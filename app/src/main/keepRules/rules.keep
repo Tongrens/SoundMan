@@ -1,0 +1,2 @@
+# Keep the libxposed entry instantiated from META-INF/xposed/java_init.list.
+-keep class hk.uwu.soundman.hook.HookEntry { public <init>(); }
