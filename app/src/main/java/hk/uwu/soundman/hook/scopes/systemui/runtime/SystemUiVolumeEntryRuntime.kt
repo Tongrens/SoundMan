@@ -26,6 +26,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 
 /** 在 HyperOS 紧凑音量侧栏的音量条上方插入 SoundMan 圆钮入口。 */
 class SystemUiVolumeEntryRuntime(
@@ -36,7 +37,8 @@ class SystemUiVolumeEntryRuntime(
     private val closing = AtomicBoolean(false)
     private val lastTriggerLogMillis = AtomicLong()
     private val lastDelayLogMillis = AtomicLong()
-    private val lifecycleLock = Object()
+    private val lifecycleLock = ReentrantLock()
+    private val insertionsIdle = lifecycleLock.newCondition()
     private var activeInsertions = 0
     private var officialBlur: OfficialRingerBlur? = null
 
@@ -51,7 +53,7 @@ class SystemUiVolumeEntryRuntime(
 
     /** 在各目标 View 所属 UI Looper 上同步移除入口；失败时保留追踪状态供后续重试。 */
     fun cleanupInsertedEntries(): Boolean {
-        val alreadyClosing = synchronized(lifecycleLock) {
+        val alreadyClosing = withLifecycleLock {
             if (closing.get()) {
                 true
             } else {
@@ -104,7 +106,7 @@ class SystemUiVolumeEntryRuntime(
 
     private fun awaitActiveInsertions(): Boolean {
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MILLIS)
-        synchronized(lifecycleLock) {
+        withLifecycleLock {
             while (activeInsertions != 0) {
                 val remainingNanos = deadlineNanos - System.nanoTime()
                 if (remainingNanos <= 0L) {
@@ -112,7 +114,7 @@ class SystemUiVolumeEntryRuntime(
                     return false
                 }
                 try {
-                    TimeUnit.NANOSECONDS.timedWait(lifecycleLock, remainingNanos)
+                    insertionsIdle.awaitNanos(remainingNanos)
                 } catch (interrupted: InterruptedException) {
                     Thread.currentThread().interrupt()
                     log(Log.ERROR, TAG, "Interrupted while waiting for volume entry insertion", interrupted)
@@ -125,10 +127,19 @@ class SystemUiVolumeEntryRuntime(
 
     /** 取消 teardown，使旧 hook 在 cleanup 失败后继续工作。 */
     fun cancelCleanup() {
-        synchronized(lifecycleLock) {
+        withLifecycleLock {
             closing.set(false)
             if (activeInsertions < 0) activeInsertions = 0
-            lifecycleLock.notifyAll()
+            insertionsIdle.signalAll()
+        }
+    }
+
+    private inline fun <T> withLifecycleLock(block: () -> T): T {
+        lifecycleLock.lock()
+        try {
+            return block()
+        } finally {
+            lifecycleLock.unlock()
         }
     }
 
@@ -279,7 +290,7 @@ class SystemUiVolumeEntryRuntime(
     }
 
     private fun beginInsertion(): Boolean {
-        synchronized(lifecycleLock) {
+        withLifecycleLock {
             if (closing.get()) return false
             activeInsertions += 1
             return true
@@ -287,14 +298,14 @@ class SystemUiVolumeEntryRuntime(
     }
 
     private fun endInsertion() {
-        synchronized(lifecycleLock) {
+        withLifecycleLock {
             activeInsertions -= 1
-            lifecycleLock.notifyAll()
+            insertionsIdle.signalAll()
         }
     }
 
     private fun track(entry: View, uiLooper: Looper): Boolean {
-        synchronized(lifecycleLock) {
+        withLifecycleLock {
             if (closing.get()) return false
             synchronized(trackedEntries) {
                 if (trackedEntries.none { it.view.get() === entry }) {

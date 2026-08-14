@@ -63,9 +63,12 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
         release {
-            optimization {
-                enable = false
-            }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             signingConfig = signingConfigs.getByName("release")
             versionNameSuffix = gradle.extra["versionSuffix"].toString()
         }
@@ -159,6 +162,8 @@ dependencies {
     implementation(libs.yukihookapi.api)
     compileOnly(libs.xposed.api)
     ksp(libs.yukihookapi.ksp.xposed)
+    implementation(platform(libs.kavaref.bom))
+    implementation(libs.kavaref.android)
     implementation(libs.kavaref.core)
     implementation(libs.kavaref.extension)
     debugImplementation(libs.androidx.compose.ui.tooling)

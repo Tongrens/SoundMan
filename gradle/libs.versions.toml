@@ -27,8 +27,10 @@ miuix-icons = { group = "top.yukonga.miuix.kmp", name = "miuix-icons", version.r
 yukihookapi-api = { group = "com.highcapable.yukihookapi", name = "api", version.ref = "yukihookapi" }
 yukihookapi-ksp-xposed = { group = "com.highcapable.yukihookapi", name = "ksp-xposed", version.ref = "yukihookapi" }
 xposed-api = { group = "de.robv.android.xposed", name = "api", version = "82" }
-kavaref-core = { group = "com.highcapable.kavaref", name = "kavaref-core", version.ref = "kavaref" }
-kavaref-extension = { group = "com.highcapable.kavaref", name = "kavaref-extension", version.ref = "kavaref" }
+kavaref-bom = { module = "com.highcapable.kavaref:kavaref-bom", version.ref = "kavaref" }
+kavaref-core = { module = "com.highcapable.kavaref:kavaref-core" }
+kavaref-android = { module = "com.highcapable.kavaref:kavaref-android" }
+kavaref-extension = { module = "com.highcapable.kavaref:kavaref-extension" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 
 [plugins]

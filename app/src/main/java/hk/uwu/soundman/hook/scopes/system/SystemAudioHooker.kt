@@ -4,7 +4,6 @@ import android.content.Context
 import android.os.Binder
 import com.highcapable.kavaref.KavaRef.Companion.resolve
 import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
-import com.highcapable.yukihookapi.hook.factory.method
 import hk.uwu.soundman.hook.core.YLog
 import hk.uwu.soundman.hook.scopes.system.hidden.ActivePlaybackProbe
 import hk.uwu.soundman.hook.scopes.system.hidden.HiddenAudioSystem
@@ -55,7 +54,7 @@ object SystemAudioHooker : YukiBaseHooker() {
                 dispatchPlayerUpdate(PlayerUpdate.Track(piid, uid, playerAccess.fromPlayerIdCard(card)))
             }
         }
-        audioServiceClass.method {
+        audioService.method {
             name = "playerEvent"
         }.hookAll {
             after {
