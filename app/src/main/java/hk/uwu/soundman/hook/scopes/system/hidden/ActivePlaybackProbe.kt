@@ -3,37 +3,25 @@ package hk.uwu.soundman.hook.scopes.system.hidden
 import android.media.AudioManager
 
 /**
- * 一条探测到的活跃播放。
- *
- * @param uid 客户端 uid，始终 >= 0
- * @param piid PlayerInterfaceId；ROM 缺方法时为 null
- * @param player `getPlayerProxy` 包装结果；缺方法或 proxy 为 null 时为 null
- */
-data class ProbedPlayback(
-    val uid: Int,
-    val piid: Int?,
-    val player: HiddenPlayer?,
-)
-
-/**
- * 从 AudioManager 探测当前活跃播放。
+ * 旧探测：`isActive()` 且 uid>=0，不过滤 usage / 系统 uid。
  *
  * 动机：模块晚于开播安装时，已在播的 player 不会再走 `trackPlayer`，
  * hook 记录为空。快照必须仍能列出 AudioManager 报告的活跃 uid。
  * 整表读取走公开 `AudioManager.getActivePlaybackConfigurations()`。
  * 单条配置的必需字段失败会打日志并跳过该条；可选 piid / IPlayer 失败时仍保留 uid。
+ * 由 [PlaybackProbeFactory] 与媒体过滤实现切换；本类逻辑保持可回退。
  */
 class ActivePlaybackProbe(
     private val access: PlaybackConfigurationAccess,
     private val logError: (message: String, throwable: Throwable) -> Unit,
-) {
+) : PlaybackProbe {
     /**
      * 读取公开 `getActivePlaybackConfigurations()`，只保留 `isActive` 且 uid>=0 的配置。
      *
      * @param audioManager system_server 内的 AudioManager
      * @return 探测到的活跃播放；单条配置解析失败时跳过该条，其它配置继续
      */
-    fun probe(audioManager: AudioManager): List<ProbedPlayback> =
+    override fun probe(audioManager: AudioManager): List<ProbedPlayback> =
         probeConfigurations(audioManager.activePlaybackConfigurations)
 
     /**

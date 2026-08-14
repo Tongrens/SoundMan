@@ -45,8 +45,10 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -100,6 +102,7 @@ private val devicePageRows: DevicePageRows = DevicePageRows()
 fun SoundPanel(
     context: Context,
     onDismiss: () -> Unit,
+    onWindowReveal: (Float) -> Unit = {},
     onRequestInstalledAppsPermission: (() -> Unit)? = null,
     installedAppsPermissionRevision: Int = 0,
     fromVolumeSidebar: Boolean = false,
@@ -156,9 +159,13 @@ fun SoundPanel(
     LaunchedEffect(currentApps, selectedPackage) {
         if (selectedPackage != null && currentApps.none { it.packageName == selectedPackage }) selectedPackage = null
     }
+    val currentOnWindowReveal by rememberUpdatedState(onWindowReveal)
     val panelReveal = remember { Animatable(0f) }
     var panelEnterConsumed by remember { mutableStateOf(false) }
     var panelDismissing by remember { mutableStateOf(false) }
+    LaunchedEffect(panelReveal) {
+        snapshotFlow { panelReveal.value }.collect { currentOnWindowReveal(it) }
+    }
     LaunchedEffect(Unit) {
         if (panelEnterConsumed) return@LaunchedEffect
         panelEnterConsumed = true

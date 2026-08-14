@@ -19,21 +19,93 @@ class AppVolumeBarHitTest {
     }
 
     @Test
-    fun volumeFromOffsetMapsLeftToZeroAndRightToFull() {
-        val width = 200f
-
-        assertEquals(0, AppVolumeBarHit.volumeFromOffset(0f, width))
-        assertEquals(50, AppVolumeBarHit.volumeFromOffset(width / 2f, width))
-        assertEquals(100, AppVolumeBarHit.volumeFromOffset(width, width))
+    fun relativeDragKeepsVolumeUntilFingerMoves() {
+        assertEquals(20f, AppVolumeBarHit.volumeFromRelativeDrag(20, 0f, 200f), 0.0001f)
+        assertEquals(80f, AppVolumeBarHit.volumeFromRelativeDrag(80, 0f, 200f), 0.0001f)
     }
 
     @Test
-    fun moreZoneStillMapsHighVolume() {
+    fun relativeDragMapsFullWidthToFullRangeFromAnyStart() {
         val width = 200f
-        val moreStart = width * (1f - AppVolumeBarHit.MORE_HIT_FRACTION)
 
-        assertTrue(AppVolumeBarHit.volumeFromOffset(moreStart, width) >= 80)
-        assertEquals(100, AppVolumeBarHit.volumeFromOffset(width, width))
+        assertEquals(90f, AppVolumeBarHit.volumeFromRelativeDrag(40, width / 2f, width), 0.0001f)
+    }
+
+    @Test
+    fun relativeDragTracksSubPercentMovement() {
+        val width = 200f
+
+        assertEquals(40.5f, AppVolumeBarHit.volumeFromRelativeDrag(40, 1f, width), 0.0001f)
+        assertEquals(39.5f, AppVolumeBarHit.volumeFromRelativeDrag(40, -1f, width), 0.0001f)
+    }
+
+    @Test
+    fun rubberBandLeavesInRangeValuesUnchanged() {
+        assertEquals(0f, AppVolumeBarHit.rubberBand(0f), 0.0001f)
+        assertEquals(50f, AppVolumeBarHit.rubberBand(50f), 0.0001f)
+        assertEquals(100f, AppVolumeBarHit.rubberBand(100f), 0.0001f)
+    }
+
+    @Test
+    fun rubberBandDampsOverflowPastEnds() {
+        val overMax = AppVolumeBarHit.rubberBand(110f)
+        val underMin = AppVolumeBarHit.rubberBand(-10f)
+
+        assertTrue(overMax > 100f)
+        assertTrue(overMax < 110f)
+        assertTrue(underMin < 0f)
+        assertTrue(underMin > -10f)
+        assertEquals(
+            AppVolumeBarHit.rubberBandOverflow(10f, 100f, AppVolumeBarHit.RUBBER_BAND_COEFFICIENT),
+            overMax - 100f,
+            0.0001f,
+        )
+    }
+
+    @Test
+    fun relativeDragUsesRubberBandPastZeroAndFull() {
+        val width = 200f
+        val overshot = AppVolumeBarHit.volumeFromRelativeDrag(10, width, width)
+        val undershot = AppVolumeBarHit.volumeFromRelativeDrag(40, -width / 2f, width)
+
+        assertTrue(overshot > 100f)
+        assertTrue(overshot < 110f)
+        assertTrue(undershot < 0f)
+        assertTrue(undershot > -10f)
+        assertEquals(100, AppVolumeBarHit.committedPercent(overshot))
+        assertEquals(0, AppVolumeBarHit.committedPercent(undershot))
+    }
+
+    @Test
+    fun edgePullIsZeroInsideRangeAndGrowsOutside() {
+        assertEquals(0f, AppVolumeBarHit.edgePull(0f), 0.0001f)
+        assertEquals(0f, AppVolumeBarHit.edgePull(100f), 0.0001f)
+        assertTrue(AppVolumeBarHit.edgePull(110f) > 0f)
+        assertTrue(AppVolumeBarHit.edgePull(-8f) > 0f)
+        assertEquals(AppVolumeBarHit.EDGE_PULL_MAX, AppVolumeBarHit.edgePull(10_000f), 0.0001f)
+    }
+
+    @Test
+    fun fillFractionClampsOverflow() {
+        assertEquals(0f, AppVolumeBarHit.fillFraction(-8f), 0.0001f)
+        assertEquals(0.4f, AppVolumeBarHit.fillFraction(40f), 0.0001f)
+        assertEquals(1f, AppVolumeBarHit.fillFraction(118f), 0.0001f)
+    }
+
+    @Test
+    fun relativeDragDoesNotJumpToTouchPosition() {
+        val width = 200f
+        val touchAtRight = width * 0.9f
+
+        assertEquals(15f, AppVolumeBarHit.volumeFromRelativeDrag(15, 0f, width), 0.0001f)
+        assertEquals(25f, AppVolumeBarHit.volumeFromRelativeDrag(15, width * 0.1f, width), 0.0001f)
+        assertFalse(
+            AppVolumeBarHit.volumeFromRelativeDrag(
+                15,
+                0f,
+                width
+            ) == touchAtRight / width * 100f
+        )
     }
 
     @Test
@@ -60,19 +132,34 @@ class AppVolumeBarHitTest {
             AppVolumeBarHit.isMoreHit(0f, 0f)
         }
         assertThrows(IllegalArgumentException::class.java) {
-            AppVolumeBarHit.volumeFromOffset(0f, 0f)
+            AppVolumeBarHit.volumeFromRelativeDrag(40, 0f, 0f)
         }
         assertThrows(IllegalArgumentException::class.java) {
             AppVolumeBarHit.isMoreHit(0f, -1f)
         }
         assertThrows(IllegalArgumentException::class.java) {
-            AppVolumeBarHit.volumeFromOffset(10f, -8f)
+            AppVolumeBarHit.volumeFromRelativeDrag(40, 10f, -8f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AppVolumeBarHit.volumeFromRelativeDrag(140, 0f, 200f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AppVolumeBarHit.volumeFromRelativeDrag(20, Float.NaN, 200f)
         }
         assertThrows(IllegalArgumentException::class.java) {
             AppVolumeBarHit.moreIconFillCoverage(-0.1f)
         }
         assertThrows(IllegalArgumentException::class.java) {
             AppVolumeBarHit.isDragPastSlop(1f, 0f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AppVolumeBarHit.rubberBand(50f, min = 10f, max = 10f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AppVolumeBarHit.rubberBandOverflow(-1f, 100f, 0.55f)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AppVolumeBarHit.edgePull(Float.NaN)
         }
     }
 }

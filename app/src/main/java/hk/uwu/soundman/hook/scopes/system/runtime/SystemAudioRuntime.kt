@@ -13,16 +13,16 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Process
 import android.os.RemoteCallbackList
-import hk.uwu.soundman.`internal`.ipc.ISoundManClientCallback
-import hk.uwu.soundman.`internal`.ipc.ISoundManHostService
+import hk.uwu.soundman.hook.scopes.system.hidden.HiddenPlayer
+import hk.uwu.soundman.hook.scopes.system.hidden.OutputDeviceMapper
+import hk.uwu.soundman.hook.scopes.system.hidden.PlaybackProbe
+import hk.uwu.soundman.hook.scopes.system.hidden.ProbedPlayback
+import hk.uwu.soundman.internal.ipc.ISoundManClientCallback
+import hk.uwu.soundman.internal.ipc.ISoundManHostService
 import hk.uwu.soundman.ipc.HostOfferPublisher
 import hk.uwu.soundman.ipc.SoundManProtocol
 import hk.uwu.soundman.model.AppAudioRule
 import hk.uwu.soundman.model.AudioOutputDevice
-import hk.uwu.soundman.hook.scopes.system.hidden.ActivePlaybackProbe
-import hk.uwu.soundman.hook.scopes.system.hidden.HiddenPlayer
-import hk.uwu.soundman.hook.scopes.system.hidden.OutputDeviceMapper
-import hk.uwu.soundman.hook.scopes.system.hidden.ProbedPlayback
 import hk.uwu.soundman.model.OutputTarget
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -33,7 +33,7 @@ class SystemAudioRuntime(
     private val context: Context,
     private val outputDeviceMapper: OutputDeviceMapper,
     private val outputDeviceConsolidator: OutputDeviceConsolidator,
-    private val playbackProbe: ActivePlaybackProbe,
+    private val playbackProbe: PlaybackProbe,
     private val playbackMerge: SnapshotPlaybackMerge,
     private val log: (level: Int, message: String, throwable: Throwable?) -> Unit,
 ) {

@@ -2,7 +2,6 @@ package hk.uwu.soundman.ui
 
 import android.graphics.drawable.Drawable
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -10,16 +9,15 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -27,6 +25,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -42,9 +43,9 @@ import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
+import top.yukonga.miuix.kmp.basic.Icon
 import kotlin.math.hypot
 import kotlin.math.roundToInt
-import top.yukonga.miuix.kmp.basic.Icon
 
 /**
  * 横向厚胶囊音量栏的命中与取值。
@@ -53,6 +54,11 @@ import top.yukonga.miuix.kmp.basic.Icon
  */
 object AppVolumeBarHit {
     const val MORE_HIT_FRACTION = 0.16f
+    const val VOLUME_MIN = 0f
+    const val VOLUME_MAX = 100f
+    const val RUBBER_BAND_COEFFICIENT = 0.55f
+    const val EDGE_PULL_GAIN = 0.4f
+    const val EDGE_PULL_MAX = 0.06f
 
     /**
      * 点是否落在条内部右侧三点区。
@@ -66,15 +72,89 @@ object AppVolumeBarHit {
     }
 
     /**
-     * 把水平偏移映射成 0..100 音量。左缘=0，右缘=100。
+     * 相对滑动：按下时音量不变，左右移动才加减进度。
      *
-     * @param x 相对条左缘的水平坐标
+     * 范围内线性跟手；越出 0/100 后橡胶阻尼，位移越大越沉。
+     * 点按不会跳到手指所在位置。
+     *
+     * @param startVolume 按下时的音量 0..100
+     * @param deltaX 相对按下点的水平位移，右为正
      * @param width 整条宽度，必须大于 0
      */
-    fun volumeFromOffset(x: Float, width: Float): Int {
+    fun volumeFromRelativeDrag(startVolume: Int, deltaX: Float, width: Float): Float {
+        require(startVolume in 0..100) { "startVolume must be in 0..100" }
         require(width > 0f) { "width must be > 0" }
-        val fraction = (x / width).coerceIn(0f, 1f)
-        return (fraction * 100f).roundToInt().coerceIn(0, 100)
+        require(deltaX.isFinite()) { "deltaX must be finite" }
+        val linear = startVolume + (deltaX / width) * VOLUME_MAX
+        return rubberBand(linear)
+    }
+
+    /**
+     * 越出 [min, max] 的位移按橡胶带衰减，范围内原样返回。
+     *
+     * @param value 线性音量，可以越界
+     * @param min 下界
+     * @param max 上界，必须大于 [min]
+     * @param coefficient 阻尼系数，必须大于 0
+     */
+    fun rubberBand(
+        value: Float,
+        min: Float = VOLUME_MIN,
+        max: Float = VOLUME_MAX,
+        coefficient: Float = RUBBER_BAND_COEFFICIENT,
+    ): Float {
+        require(value.isFinite()) { "value must be finite" }
+        require(max > min) { "max must be > min" }
+        require(coefficient > 0f) { "coefficient must be > 0" }
+        if (value in min..max) return value
+        val dimension = max - min
+        return if (value > max) {
+            max + rubberBandOverflow(value - max, dimension, coefficient)
+        } else {
+            min - rubberBandOverflow(min - value, dimension, coefficient)
+        }
+    }
+
+    /**
+     * 单向越界位移的橡胶衰减。
+     *
+     * `overflow=0` 仍为 0；越大越接近 [dimension]，永远到不了线性越界那么远。
+     */
+    fun rubberBandOverflow(overflow: Float, dimension: Float, coefficient: Float): Float {
+        require(overflow >= 0f) { "overflow must not be negative" }
+        require(overflow.isFinite()) { "overflow must be finite" }
+        require(dimension > 0f) { "dimension must be > 0" }
+        require(coefficient > 0f) { "coefficient must be > 0" }
+        return (1f - 1f / (overflow * coefficient / dimension + 1f)) * dimension
+    }
+
+    /**
+     * 越出 0/100 时条的拉伸量，范围内为 0。
+     */
+    fun edgePull(volume: Float): Float {
+        require(volume.isFinite()) { "volume must be finite" }
+        val overflow = when {
+            volume > VOLUME_MAX -> volume - VOLUME_MAX
+            volume < VOLUME_MIN -> VOLUME_MIN - volume
+            else -> 0f
+        }
+        return (overflow / VOLUME_MAX * EDGE_PULL_GAIN).coerceIn(0f, EDGE_PULL_MAX)
+    }
+
+    /**
+     * 拖动填充比例，越界时夹在 0..1。
+     */
+    fun fillFraction(volume: Float): Float {
+        require(volume.isFinite()) { "volume must be finite" }
+        return (volume / VOLUME_MAX).coerceIn(0f, 1f)
+    }
+
+    /**
+     * 松手写入规则的整数音量。
+     */
+    fun committedPercent(volume: Float): Int {
+        require(volume.isFinite()) { "volume must be finite" }
+        return volume.roundToInt().coerceIn(0, 100)
     }
 
     /**
@@ -110,10 +190,13 @@ object AppVolumeBarHit {
 }
 
 private val BarShape = RoundedCornerShape(22.dp)
-private val FillShape = RoundedCornerShape(4.dp)
 private val TrackColor = Color.White.copy(alpha = 0.18f)
 private val FillColor = Color.White
 private val InBarIconAlpha = 0.92f
+private const val DRAG_DAMPING = 0.84f
+private const val DRAG_STIFFNESS = 1600f
+private const val REST_DAMPING = 0.86f
+private const val REST_STIFFNESS = 700f
 
 /**
  * 系统音量栏同款大圆角方条，横放。
@@ -136,16 +219,26 @@ fun AppVolumeBar(
     val currentOnVolumeChange by rememberUpdatedState(onVolumeChange)
     val currentOnFinished by rememberUpdatedState(onVolumeChangeFinished)
     val currentOnMore by rememberUpdatedState(onMoreClick)
+    val currentVolume by rememberUpdatedState(volumePercent)
     val iconBitmap = remember(appIcon) { appIcon.toBitmap(96, 96).asImageBitmap() }
     var dragging by remember { mutableStateOf(false) }
+    var dragVolume by remember { mutableFloatStateOf(0f) }
     val displayedFraction by animateFloatAsState(
-        targetValue = volumePercent / 100f,
-        animationSpec = if (dragging) {
-            snap()
+        targetValue = if (dragging) {
+            AppVolumeBarHit.fillFraction(dragVolume)
         } else {
-            spring(dampingRatio = 0.86f, stiffness = 700f)
+            volumePercent / 100f
         },
+        animationSpec = spring(
+            dampingRatio = if (dragging) DRAG_DAMPING else REST_DAMPING,
+            stiffness = if (dragging) DRAG_STIFFNESS else REST_STIFFNESS,
+        ),
         label = "volumeFill",
+    )
+    val edgePull by animateFloatAsState(
+        targetValue = if (dragging) AppVolumeBarHit.edgePull(dragVolume) else 0f,
+        animationSpec = spring(dampingRatio = DRAG_DAMPING, stiffness = DRAG_STIFFNESS),
+        label = "edgePull",
     )
     val pressScale by animateFloatAsState(
         targetValue = if (dragging) 0.985f else 1f,
@@ -153,13 +246,13 @@ fun AppVolumeBar(
         label = "volumePress",
     )
 
-    BoxWithConstraints(
+    Box(
         modifier
             .fillMaxWidth()
             .height(60.dp)
             .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
+                scaleX = pressScale * (1f + edgePull)
+                scaleY = pressScale * (1f - edgePull * 0.35f)
             }
             .clip(BarShape)
             .background(TrackColor)
@@ -175,54 +268,72 @@ fun AppVolumeBar(
                     val width = size.width.toFloat()
                     if (width <= 0f) return@awaitEachGesture
                     val slop = viewConfiguration.touchSlop
+                    val startVolume = currentVolume
                     val startedOnMore = AppVolumeBarHit.isMoreHit(down.position.x, width)
-                    var startX = down.position.x
-                    if (startedOnMore) {
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
-                            if (!change.pressed) {
-                                currentOnMore()
-                                return@awaitEachGesture
-                            }
-                            val distance = hypot(
-                                change.position.x - down.position.x,
-                                change.position.y - down.position.y,
-                            )
-                            if (AppVolumeBarHit.isDragPastSlop(distance, slop)) {
-                                startX = change.position.x
-                                change.consume()
-                                break
-                            }
+                    var releasedWithoutDrag = false
+                    var slopX = down.position.x
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                            ?: return@awaitEachGesture
+                        if (!change.pressed) {
+                            releasedWithoutDrag = true
+                            break
                         }
-                    } else {
-                        down.consume()
+                        val distance = hypot(
+                            change.position.x - down.position.x,
+                            change.position.y - down.position.y,
+                        )
+                        if (AppVolumeBarHit.isDragPastSlop(distance, slop)) {
+                            slopX = change.position.x
+                            change.consume()
+                            break
+                        }
+                    }
+                    if (releasedWithoutDrag) {
+                        if (startedOnMore) currentOnMore()
+                        return@awaitEachGesture
+                    }
+                    var lastPercent = startVolume
+                    fun applyDrag(deltaX: Float, barWidth: Float) {
+                        val volume =
+                            AppVolumeBarHit.volumeFromRelativeDrag(startVolume, deltaX, barWidth)
+                        dragVolume = volume
+                        val percent = AppVolumeBarHit.committedPercent(volume)
+                        if (percent != lastPercent) {
+                            lastPercent = percent
+                            currentOnVolumeChange(percent)
+                        }
                     }
                     dragging = true
-                    currentOnVolumeChange(AppVolumeBarHit.volumeFromOffset(startX, width))
+                    applyDrag(slopX - down.position.x, width)
                     drag(down.id) { change ->
                         val dragWidth = size.width.toFloat()
                         if (dragWidth > 0f) {
-                            currentOnVolumeChange(AppVolumeBarHit.volumeFromOffset(change.position.x, dragWidth))
+                            applyDrag(change.position.x - down.position.x, dragWidth)
                         }
                         change.consume()
                     }
                     dragging = false
+                    val finished = AppVolumeBarHit.committedPercent(dragVolume)
+                    if (finished != lastPercent) currentOnVolumeChange(finished)
                     currentOnFinished()
                 }
             },
     ) {
-        val fillWidth = maxWidth * displayedFraction
-        if (fillWidth > 0.dp) {
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .fillMaxHeight()
-                .width(fillWidth)
-                .clip(FillShape)
-                .background(FillColor),
-            )
-        }
+        Box(
+            Modifier
+                .matchParentSize()
+                .drawBehind {
+                    val fillWidth = size.width * displayedFraction.coerceIn(0f, 1f)
+                    if (fillWidth <= 0f) return@drawBehind
+                    drawRoundRect(
+                        color = FillColor,
+                        size = Size(fillWidth, size.height),
+                        cornerRadius = CornerRadius(4.dp.toPx()),
+                    )
+                },
+        )
         Image(
             bitmap = iconBitmap,
             contentDescription = null,
@@ -233,7 +344,7 @@ fun AppVolumeBar(
                 .clip(RoundedCornerShape(10.dp)),
             alpha = InBarIconAlpha,
         )
-        val moreCoverage = AppVolumeBarHit.moreIconFillCoverage(displayedFraction)
+        val moreCoverage = AppVolumeBarHit.moreIconFillCoverage(displayedFraction.coerceIn(0f, 1f))
         val moreTint = lerp(Color.White, Color.Black, moreCoverage).copy(alpha = InBarIconAlpha)
         Box(
             Modifier

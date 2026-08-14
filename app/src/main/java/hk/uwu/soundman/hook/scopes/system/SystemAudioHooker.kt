@@ -5,12 +5,13 @@ import android.os.Binder
 import com.highcapable.kavaref.KavaRef.Companion.resolve
 import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
 import hk.uwu.soundman.hook.core.YLog
-import hk.uwu.soundman.hook.scopes.system.hidden.ActivePlaybackProbe
 import hk.uwu.soundman.hook.scopes.system.hidden.HiddenAudioSystem
 import hk.uwu.soundman.hook.scopes.system.hidden.HiddenPlayer
 import hk.uwu.soundman.hook.scopes.system.hidden.HiddenPlayerAccess
+import hk.uwu.soundman.hook.scopes.system.hidden.MediaPlaybackAccess
 import hk.uwu.soundman.hook.scopes.system.hidden.OutputDeviceMapper
 import hk.uwu.soundman.hook.scopes.system.hidden.PlaybackConfigurationAccess
+import hk.uwu.soundman.hook.scopes.system.hidden.PlaybackProbeFactory
 import hk.uwu.soundman.hook.scopes.system.runtime.OutputDeviceConsolidator
 import hk.uwu.soundman.hook.scopes.system.runtime.SnapshotPlaybackMerge
 import hk.uwu.soundman.hook.scopes.system.runtime.SystemAudioRuntime
@@ -101,9 +102,12 @@ object SystemAudioHooker : YukiBaseHooker() {
                 context = context,
                 outputDeviceMapper = OutputDeviceMapper(audioSystem),
                 outputDeviceConsolidator = OutputDeviceConsolidator(),
-                playbackProbe = ActivePlaybackProbe(PlaybackConfigurationAccess()) { message, throwable ->
-                    YLog.error(message, throwable)
-                },
+                playbackProbe = PlaybackProbeFactory.create(
+                    access = PlaybackConfigurationAccess(),
+                    mediaAccess = MediaPlaybackAccess(),
+                    packageNameForUid = { uid -> context.packageManager.getNameForUid(uid) },
+                    logError = { message, throwable -> YLog.error(message, throwable) },
+                ),
                 playbackMerge = SnapshotPlaybackMerge(),
                 log = { level, message, throwable ->
                     when (level) {

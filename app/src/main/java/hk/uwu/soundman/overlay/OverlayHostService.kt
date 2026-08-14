@@ -43,6 +43,7 @@ private const val NOTIFICATION_ID = 1108
 class OverlayHostService : Service() {
     private val windowManager by lazy { getSystemService(WindowManager::class.java) }
     private var panelView: ComposeView? = null
+    private var overlayParams: WindowManager.LayoutParams? = null
     private var composeOwner: OverlayComposeOwner? = null
 
     override fun onCreate() {
@@ -94,7 +95,7 @@ class OverlayHostService : Service() {
             }
             setOnTouchListener { _, event ->
                 if (event.action == android.view.MotionEvent.ACTION_OUTSIDE) {
-                    stopSelf()
+                    owner.onBackPressedDispatcher.onBackPressed()
                     true
                 } else {
                     false
@@ -108,6 +109,7 @@ class OverlayHostService : Service() {
                 SoundPanel(
                     context = this@OverlayHostService,
                     onDismiss = ::stopSelf,
+                    onWindowReveal = ::applyWindowReveal,
                     onRequestInstalledAppsPermission = ::openMainActivityForInstalledAppsPermission,
                     fromVolumeSidebar = fromVolumeSidebar,
                 )
@@ -121,28 +123,30 @@ class OverlayHostService : Service() {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-            } else {
-                flags
-            },
+            flags,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.CENTER
-            dimAmount = 0.45f
+            val hidden = OverlayWindowReveal.chrome(0f)
+            dimAmount = hidden.dimAmount
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                setBlurBehindRadius(80)
+                setBlurBehindRadius(hidden.blurRadiusPx)
             }
         }
         try {
+            overlayParams = params
+            panelView = view
             windowManager.addView(view, params)
             composeOwner = owner
-            panelView = view
         } catch (error: WindowManager.BadTokenException) {
+            panelView = null
+            overlayParams = null
             owner.destroy()
             AppLog.error("WindowManager rejected overlay token", error)
             stopSelf()
         } catch (error: SecurityException) {
+            panelView = null
+            overlayParams = null
             owner.destroy()
             AppLog.error("WindowManager denied TYPE_APPLICATION_OVERLAY", error)
             stopSelf()
@@ -159,8 +163,29 @@ class OverlayHostService : Service() {
             }
         }
         panelView = null
+        overlayParams = null
         composeOwner?.destroy()
         composeOwner = null
+    }
+
+    private fun applyWindowReveal(reveal: Float) {
+        val view = panelView ?: return
+        val params = overlayParams ?: return
+        val chrome = OverlayWindowReveal.chrome(reveal)
+        params.dimAmount = chrome.dimAmount
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            params.flags = if (chrome.blurEnabled) {
+                params.flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
+            } else {
+                params.flags and WindowManager.LayoutParams.FLAG_BLUR_BEHIND.inv()
+            }
+            params.setBlurBehindRadius(chrome.blurRadiusPx)
+        }
+        try {
+            windowManager.updateViewLayout(view, params)
+        } catch (error: IllegalArgumentException) {
+            AppLog.error("Overlay window was already detached", error)
+        }
     }
 
     private fun openMainActivityForInstalledAppsPermission() {

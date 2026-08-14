@@ -12,7 +12,7 @@ class SnapshotPlaybackMerge {
      * 计算快照要用的 uid → 播放器数量。
      *
      * @param startedCounts hook 记录里 `state == STARTED` 的 uid 计数
-     * @param probedUids [hk.uwu.soundman.hook.scopes.system.hidden.ActivePlaybackProbe] 得到的 uid
+     * @param probedUids [hk.uwu.soundman.hook.scopes.system.hidden.PlaybackProbe] 得到的 uid
      * @return uid 升序的计数表；探测到但无 STARTED 记录时 count 为 1
      */
     fun merge(startedCounts: Map<Int, Int>, probedUids: Set<Int>): Map<Int, Int> {
