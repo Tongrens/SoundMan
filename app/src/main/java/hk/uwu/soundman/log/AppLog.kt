@@ -1,16 +1,17 @@
-package hk.uwu.soundman.hook.core
+package hk.uwu.soundman.log
 
+import android.util.Log
 import hk.uwu.soundman.BuildConfig
-import com.highcapable.yukihookapi.hook.log.YLog as YukiLog
 
 /**
- * Hook 进程日志。封装 [YukiLog]，只在 Zygote / system_server / SystemUI 里用。
+ * 模块 App 进程日志。
  *
- * 动机：YukiHook 的 [YukiLog] 会同时打 logcat 和 Xposed 宿主日志；
- * 手动调用不受 `isDebug` 关闭影响，所以这里再用 [BuildConfig.DEBUG] 闸一次。
- * 模块 App 进程不得走这个出口。
+ * 动机：YukiHook 的 YLog 只在 Hook 环境里适用；普通进程落到 [android.util.Log]。
+ * 同样只在 [BuildConfig.DEBUG] 时输出。
  */
-object YLog {
+object AppLog {
+    private const val TAG = "SoundMan"
+
     /**
      * Release 构建必须静默。
      */
@@ -19,50 +20,50 @@ object YLog {
     /** 输出 debug 文本。 */
     fun debug(message: Any?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        YukiLog.debug(msg = message)
+        Log.d(TAG, message.toString())
     }
 
     /** 输出 info 文本。 */
     fun info(message: Any?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        YukiLog.info(msg = message)
+        Log.i(TAG, message.toString())
     }
 
     /** 输出 warn 文本或异常。 */
     fun warn(message: Any?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        if (message is Throwable) YukiLog.warn(e = message)
-        else YukiLog.warn(msg = message)
+        if (message is Throwable) Log.w(TAG, message.message.orEmpty(), message)
+        else Log.w(TAG, message.toString())
     }
 
     /** 输出 error 文本或异常。 */
     fun error(message: Any?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        if (message is Throwable) YukiLog.error(e = message)
-        else YukiLog.error(msg = message)
+        if (message is Throwable) Log.e(TAG, message.message.orEmpty(), message)
+        else Log.e(TAG, message.toString())
     }
 
     /** 输出带异常对象的 debug 文本。 */
     fun debug(message: Any?, throwable: Throwable?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        YukiLog.debug(msg = message, e = throwable)
+        Log.d(TAG, message.toString(), throwable)
     }
 
     /** 输出带异常对象的 info 文本。 */
     fun info(message: Any?, throwable: Throwable?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        YukiLog.info(msg = message, e = throwable)
+        Log.i(TAG, message.toString(), throwable)
     }
 
     /** 输出带异常对象的 warn 文本。 */
     fun warn(message: Any?, throwable: Throwable?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        YukiLog.warn(msg = message, e = throwable)
+        Log.w(TAG, message.toString(), throwable)
     }
 
     /** 输出带异常对象的 error 文本。 */
     fun error(message: Any?, throwable: Throwable?) {
         if (!shouldEmit(BuildConfig.DEBUG)) return
-        YukiLog.error(msg = message, e = throwable)
+        Log.e(TAG, message.toString(), throwable)
     }
 }

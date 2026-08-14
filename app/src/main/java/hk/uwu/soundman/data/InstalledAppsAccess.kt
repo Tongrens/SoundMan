@@ -1,7 +1,7 @@
 package hk.uwu.soundman.data
 
 import android.content.Context
-import android.util.Log
+import hk.uwu.soundman.log.AppLog
 
 /**
  * 读取已安装应用信息的访问门禁。
@@ -17,7 +17,7 @@ import android.util.Log
  */
 class InstalledAppsAccess(
     private val catalog: PermissionCatalog,
-    private val warn: (tag: String, message: String) -> Unit = { tag, message -> Log.w(tag, message) },
+    private val warn: (tag: String, message: String) -> Unit = { _, message -> AppLog.warn(message) },
 ) {
     /**
      * 当前系统是否把该权限实现为可动态申请的 runtime permission。

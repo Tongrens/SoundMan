@@ -16,51 +16,54 @@ class PreferredDeviceUsageTest {
     }
 
     @Test
-    fun sameDeviceSharesUsage() {
+    fun singleOccupiedDeviceDoesNotDisguise() {
         val speakerA = PreferredDeviceSync.forced(1, 2, "")
         val speakerB = PreferredDeviceSync.forced(2, 2, "")
         val usages = PreferredDeviceUsage.allocate(listOf(speakerA, speakerB))
-        assertEquals(usages[1], usages[2])
-        assertEquals(PreferredDeviceUsage.USAGE_GAME, usages[1])
-        assertTrue(PreferredDeviceUsage.shouldRewrite(usages.getValue(1)))
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, usages[1])
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, usages[2])
+        assertFalse(PreferredDeviceUsage.shouldRewrite(usages.getValue(1)))
     }
 
     @Test
-    fun differentDevicesGetDifferentUsages() {
+    fun onlyBluetoothStaysMedia() {
+        val usages = PreferredDeviceUsage.allocate(
+            listOf(PreferredDeviceSync.forced(2, 8, "AA:BB")),
+        )
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, usages[2])
+    }
+
+    @Test
+    fun additionalDeviceIsDisguisedAsRingtone() {
         val speaker = PreferredDeviceSync.forced(1, 2, "")
         val bt = PreferredDeviceSync.forced(2, 8, "AA:BB")
         val usages = PreferredDeviceUsage.allocate(listOf(speaker, bt))
-        assertEquals(PreferredDeviceUsage.USAGE_GAME, usages[1])
-        assertEquals(PreferredDeviceUsage.USAGE_ASSISTANT, usages[2])
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, usages[2])
+        assertEquals(PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE, usages[1])
+        assertTrue(PreferredDeviceUsage.shouldRewrite(usages.getValue(1)))
+        assertFalse(PreferredDeviceUsage.shouldRewrite(usages.getValue(2)))
     }
 
     @Test
-    fun fourDevicesFillThePool() {
+    fun thirdDeviceIsDisguisedAsAlarm() {
         val hints = listOf(
             PreferredDeviceSync.forced(1, 2, ""),
             PreferredDeviceSync.forced(2, 8, "A"),
-            PreferredDeviceSync.forced(3, 8, "B"),
-            PreferredDeviceSync.forced(4, 3, ""),
+            PreferredDeviceSync.forced(3, 11, "usb"),
         )
         val usages = PreferredDeviceUsage.allocate(hints)
-        assertEquals(
-            setOf(
-                PreferredDeviceUsage.USAGE_GAME,
-                PreferredDeviceUsage.USAGE_ASSISTANT,
-                PreferredDeviceUsage.USAGE_NAVIGATION,
-                PreferredDeviceUsage.USAGE_ACCESSIBILITY,
-            ),
-            usages.values.toSet(),
-        )
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, usages[2])
+        assertEquals(PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE, usages[3])
+        assertEquals(PreferredDeviceUsage.USAGE_ALARM, usages[1])
     }
 
     @Test
-    fun mixedFollowSystemDoesNotConsumePool() {
+    fun mixedFollowSystemDoesNotCreateDisguise() {
         val follow = PreferredDeviceSync.followSystem(1)
         val speaker = PreferredDeviceSync.forced(2, 2, "")
         val usages = PreferredDeviceUsage.allocate(listOf(follow, speaker))
         assertEquals(PreferredDeviceUsage.USAGE_MEDIA, usages[1])
-        assertEquals(PreferredDeviceUsage.USAGE_GAME, usages[2])
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, usages[2])
     }
 
     @Test
@@ -71,7 +74,63 @@ class PreferredDeviceUsageTest {
                 PreferredDeviceSync.forced(3, 8, "AA"),
             ),
         )
-        assertEquals(PreferredDeviceUsage.USAGE_ASSISTANT, allocated.single { it.uid == 8 }.usage)
-        assertEquals(PreferredDeviceUsage.USAGE_GAME, allocated.single { it.uid == 3 }.usage)
+        assertEquals(
+            PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE,
+            allocated.single { it.uid == 8 }.usage
+        )
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, allocated.single { it.uid == 3 }.usage)
+    }
+
+    @Test
+    fun streamTypeMatchesDisguise() {
+        assertEquals(
+            PreferredDeviceUsage.STREAM_MUSIC,
+            PreferredDeviceUsage.streamType(PreferredDeviceUsage.USAGE_MEDIA)
+        )
+        assertEquals(
+            PreferredDeviceUsage.STREAM_RING,
+            PreferredDeviceUsage.streamType(PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE)
+        )
+        assertEquals(
+            PreferredDeviceUsage.STREAM_ALARM,
+            PreferredDeviceUsage.streamType(PreferredDeviceUsage.USAGE_ALARM)
+        )
+    }
+
+    @Test
+    fun fourthDeviceIsRejected() {
+        val hints = listOf(
+            PreferredDeviceSync.forced(1, 2, ""),
+            PreferredDeviceSync.forced(2, 8, "A"),
+            PreferredDeviceSync.forced(3, 11, "usb"),
+            PreferredDeviceSync.forced(4, 3, "wired"),
+        )
+        val error = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            PreferredDeviceUsage.allocate(hints)
+        }
+        assertTrue(error.message.orEmpty().contains("too many distinct forced devices"))
+    }
+
+    @Test
+    fun nameMapsKnownUsages() {
+        assertEquals("MEDIA", PreferredDeviceUsage.name(PreferredDeviceUsage.USAGE_MEDIA))
+        assertEquals("ALARM", PreferredDeviceUsage.name(PreferredDeviceUsage.USAGE_ALARM))
+        assertEquals(
+            "RINGTONE",
+            PreferredDeviceUsage.name(PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE)
+        )
+        assertEquals("99", PreferredDeviceUsage.name(99))
+    }
+
+    @Test
+    fun describeIncludesUidAndUsage() {
+        val described = PreferredDeviceUsage.describe(
+            listOf(
+                PreferredDeviceSync.forced(8, 2, "")
+                    .copy(usage = PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE),
+            ),
+        )
+        assertTrue(described.contains("uid=8"))
+        assertTrue(described.contains("usage=RINGTONE"))
     }
 }

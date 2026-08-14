@@ -1,36 +1,27 @@
 package hk.uwu.soundman
 
 import android.content.Intent
-import android.graphics.Color
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
-import android.view.Gravity
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.core.net.toUri
+import hk.uwu.soundman.MainActivity.Companion.ACTION_OPEN_OVERLAY
 import hk.uwu.soundman.data.InstalledAppsAccess
 import hk.uwu.soundman.data.PermissionCatalog
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.overlay.OverlayHostService
 import hk.uwu.soundman.overlay.OverlayOpenRequest
-import hk.uwu.soundman.ui.SoundPanel
-
-private const val TAG = "SoundManActivity"
+import hk.uwu.soundman.ui.HomeScreen
 
 /**
- * 透明浮层式入口。普通应用进程只负责面板、规则持久化与悬浮窗授权。
+ * 模块主页。音量调节只出现在悬浮窗；侧栏入口仍走 [ACTION_OPEN_OVERLAY] 直接打开悬浮窗。
  */
 class MainActivity : ComponentActivity() {
-    private var finishAfterPermissionResult = false
-    private var showPanel by mutableStateOf(false)
-    private var installedAppsPermissionRevision by mutableIntStateOf(0)
+    private var finishAfterOverlay = false
+    private var homeVisible = false
 
     private val overlayPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -38,73 +29,50 @@ class MainActivity : ComponentActivity() {
         if (Settings.canDrawOverlays(this)) {
             showSystemOverlay()
         } else {
-            Log.e(TAG, "Overlay permission was not granted")
-            if (finishAfterPermissionResult) finish()
+            AppLog.error("Overlay permission was not granted")
+            if (finishAfterOverlay && !homeVisible) finish()
         }
     }
 
     private val installedAppsPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        Log.i(TAG, "GET_INSTALLED_APPS granted=$granted")
-        installedAppsPermissionRevision++
-        showPanel = true
+        AppLog.info("GET_INSTALLED_APPS granted=$granted")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
         if (intent?.action == ACTION_OPEN_OVERLAY) {
-            finishAfterPermissionResult = true
+            setTheme(R.style.Theme_SoundMan_Overlay)
+        }
+        super.onCreate(savedInstanceState)
+        splashScreen.setOnExitAnimationListener { it.remove() }
+        window.setBackgroundDrawableResource(android.R.color.transparent)
+        if (intent?.action == ACTION_OPEN_OVERLAY) {
+            finishAfterOverlay = true
             requestOverlay()
             return
         }
-        configureFloatingWindow()
-        val installedAppsAccess = InstalledAppsAccess(PermissionCatalog(this))
-        if (installedAppsAccess.isRuntimePermissionPresent() && !installedAppsAccess.hasAccess(this)) {
-            installedAppsPermissionLauncher.launch(installedAppsAccess.permissionName())
-        } else {
-            showPanel = true
-        }
+        enableEdgeToEdge()
+        maybeRequestInstalledAppsPermission()
+        homeVisible = true
         setContent {
-            if (!showPanel) return@setContent
-            val permissionRevision = installedAppsPermissionRevision
-            SoundPanel(
-                context = this,
-                onRequestOverlay = ::requestOverlay,
-                onDismiss = ::finish,
-                onRequestInstalledAppsPermission = ::requestInstalledAppsPermission,
-                installedAppsPermissionRevision = permissionRevision,
-            )
+            HomeScreen(onOpenOverlay = ::requestOverlay)
         }
     }
 
-    private fun requestInstalledAppsPermission() {
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == ACTION_OPEN_OVERLAY) {
+            requestOverlay()
+        }
+    }
+
+    private fun maybeRequestInstalledAppsPermission() {
         val installedAppsAccess = InstalledAppsAccess(PermissionCatalog(this))
         if (!installedAppsAccess.isRuntimePermissionPresent()) return
-        if (installedAppsAccess.hasAccess(this)) {
-            installedAppsPermissionRevision++
-            return
-        }
+        if (installedAppsAccess.hasAccess(this)) return
         installedAppsPermissionLauncher.launch(installedAppsAccess.permissionName())
-    }
-
-    private fun configureFloatingWindow() {
-        window.setBackgroundDrawableResource(android.R.color.transparent)
-        window.setDimAmount(0.45f)
-        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
-        }
-        window.attributes = window.attributes.apply {
-            gravity = Gravity.CENTER
-            width = WindowManager.LayoutParams.MATCH_PARENT
-            height = WindowManager.LayoutParams.MATCH_PARENT
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                setBlurBehindRadius(80)
-            }
-        }
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.TRANSPARENT
     }
 
     private fun requestOverlay() {
@@ -115,7 +83,7 @@ class MainActivity : ComponentActivity() {
         overlayPermissionLauncher.launch(
             Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:$packageName"),
+                "package:$packageName".toUri(),
             ),
         )
     }
@@ -125,7 +93,7 @@ class MainActivity : ComponentActivity() {
             .setAction(OverlayHostService.ACTION_SHOW)
         OverlayOpenRequest.fromIntent(intent).putInto(overlayIntent)
         startForegroundService(overlayIntent)
-        finish()
+        if (finishAfterOverlay && !homeVisible) finish()
     }
 
     companion object {

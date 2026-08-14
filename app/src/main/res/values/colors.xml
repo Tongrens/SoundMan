@@ -8,4 +8,5 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
     <color name="soundman_logo_blue">#3985F5</color>
+    <color name="home_background">#F3F5F8</color>
 </resources>

@@ -2,7 +2,7 @@ package hk.uwu.soundman.data
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.util.Log
+import hk.uwu.soundman.log.AppLog
 
 /**
  * 系统权限目录探测。
@@ -21,7 +21,7 @@ class PermissionCatalog(
             try {
                 context.applicationContext.packageManager.getPermissionInfo(permission, 0).packageName
             } catch (error: PackageManager.NameNotFoundException) {
-                Log.i(TAG, "Permission $permission is not defined on this system", error)
+                AppLog.info("Permission $permission is not defined on this system", error)
                 null
             }
         },
@@ -58,7 +58,4 @@ class PermissionCatalog(
         return grantedOf(permission)
     }
 
-    private companion object {
-        const val TAG = "SoundMan.PermCatalog"
-    }
 }

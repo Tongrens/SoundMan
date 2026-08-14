@@ -90,6 +90,23 @@ class PreferredDeviceSyncTest {
     }
 
     @Test
+    fun matchesAcceptsAnonymizedBluetoothAddress() {
+        val spec = PreferredDeviceSync.DeviceSpec(
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            "XX:XX:XX:XX:4A:7D",
+        )
+        assertTrue(
+            PreferredDeviceSync.matches(
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                "80:C3:BA:78:4A:7D",
+                spec
+            )
+        )
+        assertTrue(PreferredDeviceSync.addressesMatch("XX:XX:XX:XX:4A:7D", "80:C3:BA:78:4A:7D"))
+        assertTrue(!PreferredDeviceSync.addressesMatch("XX:XX:XX:XX:4A:7D", "80:C3:BA:78:00:11"))
+    }
+
+    @Test
     fun resolvePublicDevicePrefersAddressThenProductNameThenType() {
         val speaker = PreferredDeviceSync.PublicDevice(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, "", "Speaker")
         val a2dp = PreferredDeviceSync.PublicDevice(
@@ -159,5 +176,48 @@ class PreferredDeviceSyncTest {
         val hint = PreferredDeviceSync.hintFor(emptyList(), 7, OutputTarget.FollowSystem)
         assertEquals(PreferredDeviceSync.followSystem(7), hint)
         assertEquals("", PreferredDeviceSync.encodePrefsValue(hint))
+    }
+
+    @Test
+    fun hintsFromEntriesSkipsNonUidKeysAndTreatsBlankAsFollowSystem() {
+        val hints = PreferredDeviceSync.hintsFromEntries(
+            mapOf(
+                "10123" to "2|",
+                "not-uid" to "8|AA",
+                "42" to "",
+            ),
+        )
+        assertEquals(2, hints.size)
+        val speaker = hints.single { it.uid == 10123 }
+        assertTrue(!speaker.followSystem)
+        assertEquals(2, speaker.publicType)
+        val follow = hints.single { it.uid == 42 }
+        assertTrue(follow.followSystem)
+    }
+
+    @Test
+    fun allocatedHintForUidUsesFullSetToAssignDistinctUsages() {
+        val entries = mapOf(
+            "10" to "2|",
+            "20" to "8|AA:BB",
+            "30" to "",
+        )
+        val speaker = PreferredDeviceSync.allocatedHintForUid(entries, 10)!!
+        val bluetooth = PreferredDeviceSync.allocatedHintForUid(entries, 20)!!
+        val follow = PreferredDeviceSync.allocatedHintForUid(entries, 30)!!
+        assertEquals(PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE, speaker.usage)
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, bluetooth.usage)
+        assertEquals(PreferredDeviceUsage.USAGE_MEDIA, follow.usage)
+        assertTrue(follow.followSystem)
+        assertNull(PreferredDeviceSync.allocatedHintForUid(entries, 99))
+    }
+
+    @Test
+    fun describeHintIncludesUsageName() {
+        val hint = PreferredDeviceSync.forced(7, 2, "")
+            .copy(usage = PreferredDeviceUsage.USAGE_NOTIFICATION_RINGTONE)
+        val described = PreferredDeviceSync.describe(hint)
+        assertTrue(described.contains("uid=7"))
+        assertTrue(described.contains("usage=RINGTONE"))
     }
 }

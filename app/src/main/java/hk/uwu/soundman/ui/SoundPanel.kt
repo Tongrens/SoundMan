@@ -2,7 +2,6 @@ package hk.uwu.soundman.ui
 
 import android.content.Context
 import android.graphics.drawable.Drawable
-import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.SizeTransform
@@ -36,7 +35,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -53,11 +51,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -78,6 +76,7 @@ import hk.uwu.soundman.data.RULE_PREFERENCES_NAME
 import hk.uwu.soundman.data.RuleStore
 import hk.uwu.soundman.data.SharedPreferencesRuleStore
 import hk.uwu.soundman.ipc.PreferredDeviceSync
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.model.AdjustableApp
 import hk.uwu.soundman.model.AppAudioRule
 import hk.uwu.soundman.model.OutputDeviceType
@@ -86,25 +85,20 @@ import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-private const val PANEL_TAG = "SoundMan.Panel"
 private const val SOURCE_STATE_LOG_INTERVAL_MILLIS = 2_000L
 private val Accent = Color(0xFF3482FF)
 private val SecondaryText = Color(0xFF66666D)
 private val PrimaryText = Color(0xFF202024)
 private val OnBlurText = Color.White.copy(alpha = 0.88f)
 private val OnBlurMuted = Color.White.copy(alpha = 0.55f)
-private val GlassShape = RoundedCornerShape(36.dp)
-private val GlassFill = Color(0x663C3C3E)
-private val GlassBorder = Color.White.copy(alpha = 0.24f)
 private val HyperOsEasing = CubicBezierEasing(0.2f, 0.0f, 0.0f, 1.0f)
 private const val HYPEROS_MOVE_MS = 380
-private const val SIDEBAR_ENTER_SCALE = 0.94f
+private const val PANEL_ENTER_SCALE = 0.94f
 private val devicePageRows: DevicePageRows = DevicePageRows()
 
 @Composable
 fun SoundPanel(
     context: Context,
-    onRequestOverlay: (() -> Unit)?,
     onDismiss: () -> Unit,
     onRequestInstalledAppsPermission: (() -> Unit)? = null,
     installedAppsPermissionRevision: Int = 0,
@@ -138,7 +132,7 @@ fun SoundPanel(
             if (signature != lastStateSignature && now - lastStateLogMillis >= SOURCE_STATE_LOG_INTERVAL_MILLIS) {
                 lastStateSignature = signature
                 lastStateLogMillis = now
-                Log.d(PANEL_TAG, "[source] consumed state=$stateType apps=$appCount")
+                AppLog.debug("[source] consumed state=$stateType apps=$appCount")
             }
         }
         onDispose { removeObserver(); hostSource.close() }
@@ -162,25 +156,21 @@ fun SoundPanel(
     LaunchedEffect(currentApps, selectedPackage) {
         if (selectedPackage != null && currentApps.none { it.packageName == selectedPackage }) selectedPackage = null
     }
-    val sidebarEnterProgress = remember { Animatable(if (fromVolumeSidebar) 0f else 1f) }
-    var sidebarEnterConsumed by remember { mutableStateOf(!fromVolumeSidebar) }
-    var sidebarDismissing by remember { mutableStateOf(false) }
-    LaunchedEffect(fromVolumeSidebar) {
-        if (!fromVolumeSidebar || sidebarEnterConsumed) return@LaunchedEffect
-        sidebarEnterConsumed = true
-        sidebarEnterProgress.animateTo(1f, tween(HYPEROS_MOVE_MS, easing = HyperOsEasing))
+    val panelReveal = remember { Animatable(0f) }
+    var panelEnterConsumed by remember { mutableStateOf(false) }
+    var panelDismissing by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (panelEnterConsumed) return@LaunchedEffect
+        panelEnterConsumed = true
+        panelReveal.animateTo(1f, tween(HYPEROS_MOVE_MS, easing = HyperOsEasing))
     }
     fun requestPanelDismiss() {
-        if (!fromVolumeSidebar) {
-            onDismiss()
-            return
-        }
-        if (sidebarDismissing) return
-        sidebarDismissing = true
+        if (panelDismissing) return
+        panelDismissing = true
     }
-    LaunchedEffect(sidebarDismissing) {
-        if (!sidebarDismissing) return@LaunchedEffect
-        sidebarEnterProgress.animateTo(0f, tween(HYPEROS_MOVE_MS, easing = HyperOsEasing))
+    LaunchedEffect(panelDismissing) {
+        if (!panelDismissing) return@LaunchedEffect
+        panelReveal.animateTo(0f, tween(HYPEROS_MOVE_MS, easing = HyperOsEasing))
         onDismiss()
     }
     BackHandler(enabled = selectedPackage != null) { selectedPackage = null }
@@ -208,33 +198,37 @@ fun SoundPanel(
                         },
                     ),
             )
-            PanelChrome(
-                onRequestOverlay = onRequestOverlay,
-                onDismiss = { requestPanelDismiss() },
-                modifier = Modifier.align(Alignment.TopEnd),
-            )
-            val sidebarMotion = if (fromVolumeSidebar) {
-                val enterT = sidebarEnterProgress.value
-                Modifier.graphicsLayer {
-                    alpha = enterT
-                    translationX = (1f - enterT) * size.width
-                    val scale = SIDEBAR_ENTER_SCALE + (1f - SIDEBAR_ENTER_SCALE) * enterT
-                    scaleX = scale
-                    scaleY = scale
+            // 侧栏打开的悬浮窗靠点空白/返回关掉，不显示右上角关闭。
+            if (!fromVolumeSidebar) {
+                PanelChrome(
+                    onDismiss = { requestPanelDismiss() },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .graphicsLayer { alpha = panelReveal.value },
+                )
+            }
+            val panelMotion = Modifier.graphicsLayer {
+                val t = panelReveal.value
+                alpha = t
+                val scale = PANEL_ENTER_SCALE + (1f - PANEL_ENTER_SCALE) * t
+                scaleX = scale
+                scaleY = scale
+                if (fromVolumeSidebar) {
+                    translationX = (1f - t) * size.width
                     transformOrigin = TransformOrigin(1f, 0.5f)
+                } else {
+                    transformOrigin = TransformOrigin(0.5f, 0.5f)
                 }
-            } else {
-                Modifier
             }
             Column(
                 Modifier
                     .align(Alignment.Center)
                     .widthIn(min = 320.dp, max = 430.dp)
                     .padding(horizontal = 24.dp)
-                    .then(sidebarMotion)
-                    .clip(GlassShape)
-                    .background(GlassFill)
-                    .border(1.dp, GlassBorder, GlassShape)
+                    .then(panelMotion)
+                    .clip(OverlayGlassShape)
+                    .background(OverlayGlassFill)
+                    .border(1.dp, OverlayGlassBorder, OverlayGlassShape)
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
@@ -352,7 +346,7 @@ private fun ObserveAudioDevicesAndFallback(
             val persistedRules = try {
                 store.readAll()
             } catch (error: RuntimeException) {
-                Log.e(PANEL_TAG, "Unable to reconcile disconnected audio targets", error)
+                AppLog.error("Unable to reconcile disconnected audio targets", error)
                 return@observer
             }
             var rulesChanged = false
@@ -364,7 +358,7 @@ private fun ObserveAudioDevicesAndFallback(
                     onFollowSystem(rule.uid)
                     rulesChanged = true
                 } catch (error: RuntimeException) {
-                    Log.e(PANEL_TAG, "Unable to persist disconnect fallback for $packageName", error)
+                    AppLog.error("Unable to persist disconnect fallback for $packageName", error)
                 }
             }
             if (rulesChanged) onRulesChanged()
@@ -375,7 +369,6 @@ private fun ObserveAudioDevicesAndFallback(
 
 @Composable
 private fun PanelChrome(
-    onRequestOverlay: (() -> Unit)?,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -386,16 +379,6 @@ private fun PanelChrome(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.End,
     ) {
-        if (onRequestOverlay != null) {
-            Text(
-                stringResource(R.string.panel_overlay),
-                modifier = Modifier
-                    .clickable(onClick = onRequestOverlay)
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                color = OnBlurMuted,
-                fontSize = 13.sp,
-            )
-        }
         Text(
             stringResource(R.string.panel_close_symbol),
             modifier = Modifier
@@ -513,7 +496,9 @@ private fun AppIcon(icon: Drawable, label: String, size: androidx.compose.ui.uni
     Image(
         bitmap = remember(label) { icon.toBitmap(64, 64).asImageBitmap() },
         contentDescription = label,
-        modifier = Modifier.size(size).clip(RoundedCornerShape(10.dp)),
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(10.dp)),
     )
 }
 
@@ -571,7 +556,9 @@ private fun DevicePageHeader(app: AdjustableApp, onBack: () -> Unit) {
         Spacer(Modifier.width(12.dp))
         androidx.compose.material3.Text(
             text = app.label,
-            modifier = Modifier.weight(1f).background(Color.Transparent),
+            modifier = Modifier
+                .weight(1f)
+                .background(Color.Transparent),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             fontWeight = FontWeight.SemiBold,

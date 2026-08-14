@@ -1,0 +1,63 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "master", "main", "dev" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Write key File
+        run: |
+          if [ ! -z "${{ secrets.SIGNING_KEY }}" ]; then
+            echo androidStoreFile=`pwd`/release-key.jks >> local.properties
+            echo ${{ secrets.SIGNING_KEY }} | base64 --decode > release-key.jks
+          fi
+
+      - name: Setup Android SDK
+        uses: amyu/setup-android@v5
+        with:
+          distribution: "zulu"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug -PbuildSuffix=canary
+
+      - name: Build and Sign Release APK
+        run: ./gradlew assembleRelease -PbuildSuffix=canary
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-debug
+          path: app/build/outputs/renamed-apk/debug/*.apk
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-release
+          path: app/build/outputs/renamed-apk/release/*.apk
+
+      - name: Upload Release Mapping
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-mapping
+          path: app/build/outputs/mapping/release/*
+          if-no-files-found: ignore

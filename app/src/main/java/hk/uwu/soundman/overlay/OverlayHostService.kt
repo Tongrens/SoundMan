@@ -9,10 +9,8 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
-import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
-import android.view.View
 import android.view.WindowManager
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.OnBackPressedDispatcherOwner
@@ -32,9 +30,9 @@ import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import hk.uwu.soundman.MainActivity
 import hk.uwu.soundman.R
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.ui.SoundPanel
 
-private const val TAG = "SoundManOverlay"
 private const val CHANNEL_ID = "soundman_overlay"
 private const val NOTIFICATION_ID = 1108
 
@@ -57,14 +55,14 @@ class OverlayHostService : Service() {
             ACTION_SHOW -> {
                 startForeground(NOTIFICATION_ID, createNotification())
                 if (!Settings.canDrawOverlays(this)) {
-                    Log.e(TAG, "Cannot show panel without SYSTEM_ALERT_WINDOW permission")
+                    AppLog.error("Cannot show panel without SYSTEM_ALERT_WINDOW permission")
                     stopSelf()
                     return START_NOT_STICKY
                 }
                 showPanel(OverlayOpenRequest.fromIntent(intent).fromVolumeSidebar)
             }
             else -> {
-                Log.e(TAG, "Unsupported overlay action: ${intent?.action}")
+                AppLog.error("Unsupported overlay action: ${intent?.action}")
                 stopSelf()
             }
         }
@@ -108,7 +106,6 @@ class OverlayHostService : Service() {
             setContent {
                 SoundPanel(
                     context = this@OverlayHostService,
-                    onRequestOverlay = null,
                     onDismiss = ::stopSelf,
                     onRequestInstalledAppsPermission = ::openMainActivityForInstalledAppsPermission,
                     fromVolumeSidebar = fromVolumeSidebar,
@@ -142,11 +139,11 @@ class OverlayHostService : Service() {
             panelView = view
         } catch (error: WindowManager.BadTokenException) {
             owner.destroy()
-            Log.e(TAG, "WindowManager rejected overlay token", error)
+            AppLog.error("WindowManager rejected overlay token", error)
             stopSelf()
         } catch (error: SecurityException) {
             owner.destroy()
-            Log.e(TAG, "WindowManager denied TYPE_APPLICATION_OVERLAY", error)
+            AppLog.error("WindowManager denied TYPE_APPLICATION_OVERLAY", error)
             stopSelf()
         }
     }
@@ -157,7 +154,7 @@ class OverlayHostService : Service() {
             try {
                 windowManager.removeView(view)
             } catch (error: IllegalArgumentException) {
-                Log.e(TAG, "Overlay view was already detached", error)
+                AppLog.error("Overlay view was already detached", error)
             }
         }
         panelView = null

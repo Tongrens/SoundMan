@@ -2,9 +2,9 @@ package hk.uwu.soundman.ipc
 
 import android.os.IBinder
 import android.os.RemoteException
-import android.util.Log
 import hk.uwu.soundman.internal.ipc.ISoundManClientCallback
 import hk.uwu.soundman.internal.ipc.ISoundManHostService
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.model.AppAudioRule
 import hk.uwu.soundman.model.OutputTarget
 
@@ -117,11 +117,11 @@ class HostSession private constructor(
         try {
             call(host)
         } catch (error: RemoteException) {
-            Log.e(TAG, "SoundMan host transaction failed: $operation", error)
+            AppLog.error("SoundMan host transaction failed: $operation", error)
             dropDeadSession()
             throw IllegalStateException("SoundMan host transaction failed: $operation", error)
         } catch (error: RuntimeException) {
-            Log.e(TAG, "SoundMan host rejected operation: $operation", error)
+            AppLog.error("SoundMan host rejected operation: $operation", error)
             if (HostIpcRecovery.isFatalHostFailure(error)) {
                 dropDeadSession()
             }
@@ -152,9 +152,9 @@ class HostSession private constructor(
         try {
             host.unregisterClient(callback)
         } catch (error: RemoteException) {
-            Log.e(TAG, "Unable to unregister SoundMan client", error)
+            AppLog.error("Unable to unregister SoundMan client", error)
         } catch (error: RuntimeException) {
-            Log.e(TAG, "Host rejected SoundMan client unregister", error)
+            AppLog.error("Host rejected SoundMan client unregister", error)
         }
     }
 
@@ -162,7 +162,7 @@ class HostSession private constructor(
         try {
             hostBinder.unlinkToDeath(deathRecipient, 0)
         } catch (error: Throwable) {
-            Log.e(TAG, "Unable to unlink SoundMan host death recipient", error)
+            AppLog.error("Unable to unlink SoundMan host death recipient", error)
         }
     }
 
@@ -171,8 +171,6 @@ class HostSession private constructor(
     }
 
     companion object {
-        private const val TAG = "SoundManHostSession"
-
         /**
          * 用 offer 带来的协议版本安装会话：linkToDeath 后 registerClient。
          *

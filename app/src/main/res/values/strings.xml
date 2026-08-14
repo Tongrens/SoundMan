@@ -1,47 +1,57 @@
 <resources>
-    <string name="app_name">SoundMan</string>
-    <string name="overlay_channel_name">SoundMan 悬浮面板</string>
-    <string name="overlay_channel_description">保持应用音量与输出设备面板可见</string>
-    <string name="overlay_notification_title">SoundMan 面板正在显示</string>
-    <string name="overlay_notification_text">使用悬浮面板调整应用规则</string>
-    <string name="overlay_close">关闭</string>
-    <string name="overlay_special_use_description">用户主动显示的持久音频规则悬浮面板</string>
-    <string name="systemui_volume_entry_content_description">打开 SoundMan 音量面板</string>
+    <string name="app_name" translatable="false">SoundMan</string>
+    <string name="home_author">Developed by %1$s</string>
+    <string name="module_version_label">Module version</string>
+    <string name="version_codename_label">Version codename</string>
+    <string name="home_status_channel">Channel</string>
+    <string name="home_git_branch">Branch</string>
+    <string name="home_open_overlay">Open volume panel</string>
+    <string name="home_github" translatable="false">GitHub</string>
+    <string name="home_xposed_active">Module activated</string>
+    <string name="home_xposed_inactive">Module not activated</string>
+    <string name="home_xposed_inactive_hint">Enable this module in the Xposed manager, then select System Framework, System UI, and any other apps that should be affected</string>
+    <string name="overlay_channel_name">SoundMan overlay</string>
+    <string name="overlay_channel_description">Keep the app volume and output device panel visible</string>
+    <string name="overlay_notification_title">SoundMan panel is showing</string>
+    <string name="overlay_notification_text">Use the overlay to adjust app rules</string>
+    <string name="overlay_close">Close</string>
+    <string name="overlay_special_use_description">Persistent audio-rules overlay shown at the user\'s request</string>
+    <string name="systemui_volume_entry_content_description">Open SoundMan volume panel</string>
 
-    <string name="panel_title">应用音量</string>
-    <string name="panel_playing_app_count">%1$d 个应用正在播放</string>
-    <string name="panel_overlay">悬浮</string>
-    <string name="panel_close_symbol">×</string>
-    <string name="panel_more_symbol">⋮</string>
-    <string name="panel_back">返回</string>
-    <string name="panel_volume_percent">%1$d%%</string>
-    <string name="panel_volume_bar">应用音量</string>
-    <string name="panel_more_devices">选择输出设备</string>
-    <string name="panel_no_playing_apps">当前没有应用正在播放</string>
-    <string name="panel_installed_apps_permission_hint">需要应用列表权限才能显示应用名称，点击授权</string>
-    <string name="panel_host_error">无法连接 system_server 音频宿主</string>
-    <string name="unknown_app">未知应用（UID %1$d）</string>
+    <string name="panel_title">App volume</string>
+    <string name="panel_playing_app_count">%1$d apps playing</string>
+    <string name="panel_overlay">Overlay</string>
+    <string name="panel_close_symbol" translatable="false">×</string>
+    <string name="panel_more_symbol" translatable="false">⋮</string>
+    <string name="panel_back">Back</string>
+    <string name="panel_volume_percent" translatable="false">%1$d%%</string>
+    <string name="panel_volume_bar">App volume</string>
+    <string name="panel_more_devices">Choose output device</string>
+    <string name="panel_no_playing_apps">No apps are playing</string>
+    <string name="panel_installed_apps_permission_hint">App list permission is required to show app names. Tap to grant</string>
+    <string name="panel_host_error">Unable to connect to the system audio host</string>
+    <string name="unknown_app">Unknown app (UID %1$d)</string>
 
-    <string name="output_devices_title">输出设备</string>
-    <string name="output_devices_hint">为此应用选择输出设备</string>
-    <string name="output_follow_system">跟随系统</string>
-    <string name="output_status_system_default">使用系统当前输出</string>
-    <string name="output_status_fallback_system">设备已断开，当前跟随系统</string>
-    <string name="output_status_connected">已连接</string>
-    <string name="output_status_unavailable">不可用：设备已断开，规则将保留</string>
-    <string name="output_status_disconnected_fallback">已断开；原目标已保留</string>
-    <string name="output_device_scan_denied">无法读取输出设备</string>
-    <string name="output_device_type_unsupported">设备公开类型 %1$s 没有已确认的 AudioSystem 内部映射，已禁止固定路由</string>
-    <string name="output_device_builtin">本机</string>
-    <string name="output_device_wired_headset">耳机</string>
-    <string name="output_device_bluetooth">蓝牙</string>
-    <string name="output_device_usb">USB</string>
-    <string name="output_device_other">其他设备</string>
+    <string name="output_devices_title">Output devices</string>
+    <string name="output_devices_hint">Choose an output device for this app</string>
+    <string name="output_follow_system">Follow system</string>
+    <string name="output_status_system_default">Using the system\'s current output</string>
+    <string name="output_status_fallback_system">Device disconnected; currently following the system</string>
+    <string name="output_status_connected">Connected</string>
+    <string name="output_status_unavailable">Unavailable: device disconnected. The rule is kept</string>
+    <string name="output_status_disconnected_fallback">Disconnected; the original target is kept</string>
+    <string name="output_device_scan_denied">Unable to read output devices</string>
+    <string name="output_device_type_unsupported">Public device type %1$s has no confirmed AudioSystem internal mapping; pinning is disabled</string>
+    <string name="output_device_builtin">Built-in</string>
+    <string name="output_device_wired_headset">Headset</string>
+    <string name="output_device_bluetooth">Bluetooth</string>
+    <string name="output_device_usb" translatable="false">USB</string>
+    <string name="output_device_other">Other device</string>
 
-    <string name="rule_storage_unavailable_title">音频宿主不可用</string>
-    <string name="rule_storage_no_fallback">请确认 Xposed 模块已启用并作用于 system_server。</string>
-    <string name="rule_corrupted_title">应用音频规则已损坏</string>
-    <string name="rule_corrupted_message">无法读取已保存规则。请检查日志并重新保存该应用的规则。</string>
+    <string name="rule_storage_unavailable_title">Audio host unavailable</string>
+    <string name="rule_storage_no_fallback">Confirm the Xposed module is enabled and applied to system_server.</string>
+    <string name="rule_corrupted_title">App audio rules are corrupted</string>
+    <string name="rule_corrupted_message">Saved rules could not be read. Check the logs and save this app\'s rules again.</string>
 
-    <string name="runtime_system_audio_provider">系统音频功能由 Xposed system_server 模块提供</string>
+    <string name="runtime_system_audio_provider">System audio features are provided by the Xposed system_server module</string>
 </resources>

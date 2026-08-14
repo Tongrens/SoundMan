@@ -1,0 +1,51 @@
+<resources>
+    <string name="home_author">由 %1$s 開發</string>
+    <string name="module_version_label">模組版本</string>
+    <string name="version_codename_label">版本代號</string>
+    <string name="home_status_channel">渠道</string>
+    <string name="home_git_branch">分支</string>
+    <string name="home_open_overlay">開啟音量面板</string>
+    <string name="home_xposed_active">模組已啟用</string>
+    <string name="home_xposed_inactive">模組未啟用</string>
+    <string name="home_xposed_inactive_hint">請在 Xposed 管理器中啟用模組，並剔選系統框架、系統介面以及其他需要生效的應用程式</string>
+    <string name="overlay_channel_name">SoundMan 懸浮面板</string>
+    <string name="overlay_channel_description">保持應用音量與輸出裝置面板可見</string>
+    <string name="overlay_notification_title">SoundMan 面板正在顯示</string>
+    <string name="overlay_notification_text">使用懸浮面板調整應用規則</string>
+    <string name="overlay_close">關閉</string>
+    <string name="overlay_special_use_description">用戶主動顯示的持久音訊規則懸浮面板</string>
+    <string name="systemui_volume_entry_content_description">開啟 SoundMan 音量面板</string>
+
+    <string name="panel_title">應用音量</string>
+    <string name="panel_playing_app_count">%1$d 個應用正在播放</string>
+    <string name="panel_overlay">懸浮</string>
+    <string name="panel_back">返回</string>
+    <string name="panel_volume_bar">應用音量</string>
+    <string name="panel_more_devices">選擇輸出裝置</string>
+    <string name="panel_no_playing_apps">目前沒有應用正在播放</string>
+    <string name="panel_installed_apps_permission_hint">需要應用程式列表權限才能顯示應用名稱，點擊授權</string>
+    <string name="panel_host_error">無法連接系統音訊宿主</string>
+    <string name="unknown_app">未知應用（UID %1$d）</string>
+
+    <string name="output_devices_title">輸出裝置</string>
+    <string name="output_devices_hint">為此應用選擇輸出裝置</string>
+    <string name="output_follow_system">跟隨系統</string>
+    <string name="output_status_system_default">使用系統目前輸出</string>
+    <string name="output_status_fallback_system">裝置已中斷連接，目前跟隨系統</string>
+    <string name="output_status_connected">已連接</string>
+    <string name="output_status_unavailable">不可用：裝置已中斷連接，規則將保留</string>
+    <string name="output_status_disconnected_fallback">已中斷連接；原目標已保留</string>
+    <string name="output_device_scan_denied">無法讀取輸出裝置</string>
+    <string name="output_device_type_unsupported">裝置公開類型 %1$s 沒有已確認的 AudioSystem 內部對應，已禁止固定路由</string>
+    <string name="output_device_builtin">本機</string>
+    <string name="output_device_wired_headset">耳機</string>
+    <string name="output_device_bluetooth">藍牙</string>
+    <string name="output_device_other">其他裝置</string>
+
+    <string name="rule_storage_unavailable_title">音訊宿主不可用</string>
+    <string name="rule_storage_no_fallback">請確認 Xposed 模組已啟用並作用於 system_server。</string>
+    <string name="rule_corrupted_title">應用音訊規則已損壞</string>
+    <string name="rule_corrupted_message">無法讀取已儲存規則。請檢查日誌並重新儲存此應用的規則。</string>
+
+    <string name="runtime_system_audio_provider">系統音訊功能由 Xposed system_server 模組提供</string>
+</resources>

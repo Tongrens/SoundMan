@@ -2,14 +2,13 @@ package hk.uwu.soundman.data
 
 import android.content.SharedPreferences
 import android.util.Base64
-import android.util.Log
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.model.AppAudioRule
 import hk.uwu.soundman.model.AudioDeviceIdentity
 import hk.uwu.soundman.model.OutputDeviceType
 import hk.uwu.soundman.model.OutputTarget
 
 const val RULE_PREFERENCES_NAME = "soundman_rules"
-private const val TAG = "SoundManRuleStore"
 
 /** 已持久化规则存在无法解析的数据时抛出，禁止静默改为跟随系统。 */
 class CorruptedAudioRuleException(message: String, cause: Throwable? = null) :
@@ -73,7 +72,7 @@ class SharedPreferencesRuleStore(
         val current = readOrDefault(packageName, uid)
         check(current.outputTarget == disconnectedTarget) { "Disconnected target no longer matches uid=$uid" }
         if (current.followsSystemAfterDisconnect) return current
-        Log.w(TAG, "Fixed output disconnected; following system uid=$uid package=$packageName")
+        AppLog.warn("Fixed output disconnected; following system uid=$uid package=$packageName")
         return persist(current.copy(followsSystemAfterDisconnect = true, revision = nextRevision()))
     }
 
@@ -108,7 +107,7 @@ class SharedPreferencesRuleStore(
                 followsSystemAfterDisconnect = preferences.getBoolean(prefix + KEY_FALLBACK, false),
             )
         } catch (error: RuntimeException) {
-            Log.e(TAG, "Unable to decode persisted rule uid=$uid", error)
+            AppLog.error("Unable to decode persisted rule uid=$uid", error)
             throw error
         }
     }
@@ -134,7 +133,7 @@ class SharedPreferencesRuleStore(
     private fun decodeTarget(encoded: String?): OutputTarget {
         if (encoded == FOLLOW_SYSTEM) return OutputTarget.FollowSystem
         if (encoded.isNullOrBlank()) corrupted("Persisted audio rule has no output target")
-        val parts = encoded!!.split('|', limit = 4)
+        val parts = encoded.split('|', limit = 4)
         if (parts.size != 4 || parts[0] != DEVICE) corrupted("Invalid output target encoding")
         val candidates = parts[3].split(',').filter(String::isNotBlank).map { encodedCandidate ->
             val separator = encodedCandidate.indexOf(':')

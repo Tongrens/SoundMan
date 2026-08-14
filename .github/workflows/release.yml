@@ -1,0 +1,105 @@
+name: Release Build
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Write key File
+        run: |
+          if [ ! -z "${{ secrets.SIGNING_KEY }}" ]; then
+            echo androidStoreFile=`pwd`/release-key.jks >> local.properties
+            echo ${{ secrets.SIGNING_KEY }} | base64 --decode > release-key.jks
+          fi
+
+      - name: Setup Android SDK
+        uses: amyu/setup-android@v5
+        with:
+          distribution: "zulu"
+          java-version: "21"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug -PbuildSuffix=release
+
+      - name: Build and Sign Release APK
+        run: ./gradlew assembleRelease -PbuildSuffix=release
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-debug
+          path: app/build/outputs/renamed-apk/debug/*.apk
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: app-release
+          path: app/build/outputs/renamed-apk/release/*.apk
+
+      - name: Upload Release Mapping
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-mapping
+          path: app/build/outputs/mapping/release/*
+          if-no-files-found: ignore
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "### 🎉 Initial Release" > changelog.md
+          else
+            echo "### 📝 Changes since $PREVIOUS_TAG" > changelog.md
+            echo "" >> changelog.md
+            git log --pretty=format:"- %s" $PREVIOUS_TAG..HEAD >> changelog.md
+          fi
+
+          echo "" >> changelog.md
+
+      - name: Create Release and Upload Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/renamed-apk/release/*.apk
+          body_path: changelog.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare Changelog for Xposed Repo
+        run: |
+          echo "https://github.com/killerprojecte/SoundMan/releases/tag/${{ github.ref_name }}" > changelog_xposed.md
+          cat changelog.md >> changelog_xposed.md
+
+      - name: Publish to Xposed Modules Repo
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: Xposed-Modules-Repo/hk.uwu.soundman
+          token: ${{ secrets.XPOSED_REPO_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: false
+          body_path: changelog_xposed.md
+          files: app/build/outputs/renamed-apk/release/*.apk

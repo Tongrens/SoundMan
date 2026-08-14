@@ -7,8 +7,8 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
-import android.util.Log
 import hk.uwu.soundman.internal.ipc.ISoundManClientCallback
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.model.AppAudioRule
 import hk.uwu.soundman.model.OutputTarget
 import java.util.concurrent.CountDownLatch
@@ -43,7 +43,7 @@ class SoundManHostBridgeClient(
             val decoded = try {
                 SoundManProtocol.decodeEvent(eventName, eventPayload)
             } catch (error: RuntimeException) {
-                Log.e(TAG, "Rejected malformed host event: $eventName", error)
+                AppLog.error("Rejected malformed host event: $eventName", error)
                 dropSession(REASON_PROTOCOL_ERROR, notify = true)
                 return
             }
@@ -75,7 +75,7 @@ class SoundManHostBridgeClient(
                     )
                     appContext.sendBroadcast(SoundManProtocol.requestBinderIntent(mailbox.binder))
                 } catch (error: Throwable) {
-                    Log.e(TAG, "Unable to request SoundMan host Binder", error)
+                    AppLog.error("Unable to request SoundMan host Binder", error)
                     connectLatch = null
                     pending.countDown()
                 }
@@ -85,7 +85,7 @@ class SoundManHostBridgeClient(
             latch.await(timeoutMs, TimeUnit.MILLISECONDS)
         } catch (error: InterruptedException) {
             Thread.currentThread().interrupt()
-            Log.e(TAG, "Interrupted while waiting for SoundMan host Binder", error)
+            AppLog.error("Interrupted while waiting for SoundMan host Binder", error)
             false
         }
         val connected = synchronized(lock) {
@@ -93,7 +93,7 @@ class SoundManHostBridgeClient(
             signalled && session?.isConnected() == true
         }
         if (!connected) {
-            Log.e(TAG, "SoundMan host connection attempt failed signalled=$signalled")
+            AppLog.error("SoundMan host connection attempt failed signalled=$signalled")
             unavailableListener(REASON_CONNECT_FAILED)
         }
         return connected
@@ -157,12 +157,12 @@ class SoundManHostBridgeClient(
             try {
                 installSession(hostBinder, protocolVersion)
             } catch (error: Throwable) {
-                Log.e(TAG, "Unable to install SoundMan host session", error)
+                AppLog.error("Unable to install SoundMan host session", error)
                 failConnect()
             }
         }
         if (!accepted) {
-            Log.e(TAG, "handshakeHandler rejected host offer dispatch")
+            AppLog.error("handshakeHandler rejected host offer dispatch")
             failConnect()
         }
     }
@@ -176,7 +176,7 @@ class SoundManHostBridgeClient(
                 onRemoteDied = { dropSession(REASON_REMOTE_DIED, notify = true) },
             )
         } catch (error: Throwable) {
-            Log.e(TAG, "Unable to register with SoundMan host", error)
+            AppLog.error("Unable to register with SoundMan host", error)
             failConnect()
             return
         }
@@ -218,13 +218,12 @@ class SoundManHostBridgeClient(
     private fun enforceSystemCaller(endpoint: String) {
         val callingUid = Binder.getCallingUid()
         if (callingUid != Process.SYSTEM_UID) {
-            Log.e(TAG, "$endpoint rejected caller uid=$callingUid")
+            AppLog.error("$endpoint rejected caller uid=$callingUid")
             throw SecurityException("$endpoint requires SYSTEM_UID")
         }
     }
 
     private companion object {
-        const val TAG = "SoundManHostBridge"
         const val DEFAULT_CONNECT_TIMEOUT_MS = 3_000L
         const val REASON_REMOTE_DIED = "remote_died"
         const val REASON_PROTOCOL_ERROR = "protocol_error"

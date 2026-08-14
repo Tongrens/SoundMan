@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import com.highcapable.yukihookapi.hook.factory.prefs
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.model.AppAudioRule
 import hk.uwu.soundman.model.OutputDeviceType
 import hk.uwu.soundman.model.OutputTarget
@@ -13,7 +15,7 @@ import hk.uwu.soundman.model.OutputTarget
  *
  * 动机：system_server 不再挑选扬声器/蓝牙候选，也不再写 Settings.Global。
  * 用户选设备后由模块进程解析公开 `AudioDeviceInfo.type` + address，
- * 再通过广播和模块 `SharedPreferences` 告诉各应用进程对自己的 Track 调 `setPreferredDevice`。
+ * 再通过广播和模块 prefs 告诉各应用进程：单设备保持 MEDIA，多设备才把新增占用伪装成铃声/闹钟。
  */
 object PreferredDeviceSync {
     /** 强制设备广播 Action。 */
@@ -22,7 +24,7 @@ object PreferredDeviceSync {
     /** 目标应用 uid。 */
     const val EXTRA_UID = "uid"
 
-    /** 是否跟随系统；为 true 时应用进程应 `setPreferredDevice(null)`。 */
+    /** 是否跟随系统；为 true 时不伪装 usage，保持 MEDIA。 */
     const val EXTRA_FOLLOW_SYSTEM = "followSystem"
 
     /** 公开 `AudioDeviceInfo.type`。FollowSystem 时为 0。 */
@@ -210,14 +212,31 @@ object PreferredDeviceSync {
      */
     fun findDevice(devices: Array<AudioDeviceInfo>, spec: DeviceSpec): AudioDeviceInfo? =
         devices.firstOrNull { device ->
-            device.type == spec.publicType && device.address.orEmpty() == spec.address
+            matches(device.type, device.address, spec)
         }
 
     /**
      * 判断公开设备是否就是这条强制规格。
+     *
+     * 蓝牙 MAC 在没有附近设备权限的进程里会被匿名成 `XX:XX:XX:XX:AB:CD`，
+     * 只比最后两段，避免钉设备时对不上。
      */
     fun matches(publicType: Int, address: String, spec: DeviceSpec): Boolean =
-        publicType == spec.publicType && address == spec.address
+        publicType == spec.publicType && addressesMatch(address, spec.address)
+
+    /**
+     * 比较设备地址。完全一致，或一方为匿名 MAC 且后缀相同，都算命中。
+     */
+    fun addressesMatch(left: String, right: String): Boolean {
+        if (left == right) return true
+        val a = normalizeAddress(left)
+        val b = normalizeAddress(right)
+        if (a.isEmpty() || b.isEmpty()) return false
+        if (a == b) return true
+        if (a.length < 4 || b.length < 4) return false
+        val anonymized = isAnonymizedAddress(left) || isAnonymizedAddress(right)
+        return anonymized && a.takeLast(4) == b.takeLast(4)
+    }
 
     /**
      * 把规则目标解析成公开 type + address。
@@ -280,20 +299,20 @@ object PreferredDeviceSync {
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { device ->
             PublicDevice(
                 publicType = device.type,
-                address = device.address.orEmpty(),
+                address = device.address,
                 productName = device.productName?.toString().orEmpty(),
             )
         }
         val hint = try {
             hintFor(devices, uid, target)
         } catch (error: Throwable) {
-            android.util.Log.e(
-                "SoundMan",
-                "Failed to resolve public device uid=$uid target=$target",
-                error,
-            )
+            AppLog.error("[route] failed to resolve public device uid=$uid target=$target", error)
             throw error
         }
+        AppLog.info(
+            "[route] publish uid=${hint.uid} follow=${hint.followSystem} publicType=${hint.publicType} " +
+                    "address=${hint.address.ifEmpty { "<empty>" }} target=$target",
+        )
         persist(context, hint)
         rebroadcastAllocated(context)
     }
@@ -307,15 +326,26 @@ object PreferredDeviceSync {
         val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { device ->
             PublicDevice(
                 publicType = device.type,
-                address = device.address.orEmpty(),
+                address = device.address,
                 productName = device.productName?.toString().orEmpty(),
             )
         }
+        AppLog.info(
+            "[route] publishAll rules=${rules.size} devices=${devices.size} " +
+                    devices.joinToString(prefix = "[", postfix = "]") { device ->
+                        "type=${device.publicType} address=${device.address.ifEmpty { "<empty>" }} name=${device.productName}"
+                    },
+        )
         rules.forEach { rule ->
             try {
-                persist(context, hintFor(devices, rule.uid, rule.effectiveOutputTarget))
+                val hint = hintFor(devices, rule.uid, rule.effectiveOutputTarget)
+                AppLog.info(
+                    "[route] publishAll persist uid=${hint.uid} follow=${hint.followSystem} " +
+                            "publicType=${hint.publicType} address=${hint.address.ifEmpty { "<empty>" }}",
+                )
+                persist(context, hint)
             } catch (error: Throwable) {
-                android.util.Log.e("SoundMan", "persist failed uid=${rule.uid}", error)
+                AppLog.error("[route] persist failed uid=${rule.uid}", error)
             }
         }
         rebroadcastAllocated(context)
@@ -326,32 +356,68 @@ object PreferredDeviceSync {
      */
     fun rebroadcastAllocated(context: Context) {
         val allocated = PreferredDeviceUsage.withAllocatedUsages(loadStoredHints(context))
+        AppLog.info(
+            "[route] rebroadcast count=${allocated.size} ${PreferredDeviceUsage.describe(allocated)}",
+        )
         allocated.forEach { hint ->
+            AppLog.info("[route] broadcast ${describe(hint)}")
             context.sendBroadcast(intent(hint).addFlags(Intent.FLAG_RECEIVER_FOREGROUND))
         }
     }
 
     /** 从模块 prefs 还原全部 uid 提示，供动态分配 usage。 */
-    fun loadStoredHints(context: Context): List<RouteHint> {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        return prefs.all.mapNotNull { (key, value) ->
+    fun loadStoredHints(context: Context): List<RouteHint> =
+        hintsFromEntries(context.prefs(PREFS_NAME).all())
+
+    /**
+     * 把 prefs 键值还原成 hint。模块进程和宿主冷启动都走 YukiHook prefs。
+     *
+     * @param entries `uid -> publicType|address`；空串表示跟随系统
+     */
+    fun hintsFromEntries(entries: Map<String, *>): List<RouteHint> =
+        entries.mapNotNull { (key, value) ->
             val uid = key.toIntOrNull() ?: return@mapNotNull null
             val spec = decodePrefsValue(value as? String)
             if (spec == null) followSystem(uid) else forced(uid, spec.publicType, spec.address)
         }
+
+    /**
+     * 按当前全量 prefs 给某个 uid 分配 usage。没有该 uid 的记录时返回 null。
+     *
+     * 动机：开机后模块 App 不会自动起来，广播到不了。各进程必须自己读 prefs、
+     * 按全量 hint 重算 usage，才能在第一支 Track 构造前改掉 MUSIC Mix。
+     */
+    fun allocatedHintForUid(entries: Map<String, *>, uid: Int): RouteHint? {
+        require(uid >= 0) { "uid must be non-negative" }
+        return PreferredDeviceUsage.withAllocatedUsages(hintsFromEntries(entries))
+            .firstOrNull { hint -> hint.uid == uid }
     }
+
+    /** 单条 hint 的 logcat 文案。 */
+    fun describe(hint: RouteHint): String =
+        "uid=${hint.uid} follow=${hint.followSystem} publicType=${hint.publicType} " +
+                "address=${hint.address.ifEmpty { "<empty>" }} usage=${
+                    PreferredDeviceUsage.name(
+                        hint.usage
+                    )
+                }"
 
     /**
      * 把提示写进模块 `soundman_route_hints`。FollowSystem 写空串，给冷启动读。
      *
-     * 必须走普通 [Context.getSharedPreferences]。模块 UI / 普通 App 进程禁止调用
-     * YukiHook `Context.prefs()`，那个 API 只属于 Hook 侧。
+     * 模块进程和宿主都用 YukiHook prefs。
      */
     fun persist(context: Context, hint: RouteHint) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(prefsKey(hint.uid), encodePrefsValue(hint))
-            .apply()
+        val key = prefsKey(hint.uid)
+        val value = encodePrefsValue(hint)
+        val prefs = context.prefs(PREFS_NAME)
+        prefs.edit {
+            putString(key, value)
+        }
+        AppLog.info(
+            "[route] persist uid=${hint.uid} value=${value.ifEmpty { "<follow>" }} " +
+                    "available=${prefs.isPreferencesAvailable}",
+        )
     }
 
     /**
@@ -390,7 +456,13 @@ object PreferredDeviceSync {
     }
 
     private fun isDummyAddress(address: String): Boolean {
-        val hex = address.filter(Char::isLetterOrDigit)
+        val hex = normalizeAddress(address)
         return hex.isEmpty() || hex.all { digit -> digit == '0' }
     }
+
+    private fun isAnonymizedAddress(address: String): Boolean =
+        address.contains("XX", ignoreCase = true)
+
+    private fun normalizeAddress(address: String): String =
+        address.filter(Char::isLetterOrDigit).uppercase()
 }

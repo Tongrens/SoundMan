@@ -5,18 +5,16 @@ import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
-import android.util.Log
 import hk.uwu.soundman.R
 import hk.uwu.soundman.ipc.PreferredDeviceSync
 import hk.uwu.soundman.ipc.SoundManHostBridgeClient
 import hk.uwu.soundman.ipc.SoundManProtocol
+import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.model.AdjustableApp
 import hk.uwu.soundman.model.OutputTarget
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.Executors
-
-private const val TAG = "SoundManHostApps"
 
 enum class ActiveMediaAppsError { HOST_UNAVAILABLE }
 
@@ -71,13 +69,13 @@ class HostPlaybackSource(
     private val reconnectRunnable = Runnable {
         reconnectScheduled = false
         if (closed || sessionInitialized) return@Runnable
-        Log.i(TAG, "Attempting scheduled SoundMan host reconnect")
+        AppLog.info("Attempting scheduled SoundMan host reconnect")
         connectThenOnWorker("scheduled reconnect failed")
     }
 
     private val snapshotWatchdog = Runnable {
         if (closed || sessionInitialized) return@Runnable
-        Log.e(TAG, "Host handshake produced no snapshot; dropping session and reconnecting")
+        AppLog.error("Host handshake produced no snapshot; dropping session and reconnecting")
         sessionInitialized = false
         bridge.resetSession()
         publishUnavailable()
@@ -91,7 +89,7 @@ class HostPlaybackSource(
         unavailableListener = { reason ->
             postToWorker("host unavailable") {
                 sessionInitialized = false
-                Log.e(TAG, "SoundMan host unavailable: $reason")
+                AppLog.error("SoundMan host unavailable: $reason")
                 publishUnavailable()
                 scheduleReconnect("host unavailable: $reason")
             }
@@ -165,14 +163,14 @@ class HostPlaybackSource(
             val connected = try {
                 bridge.connect()
             } catch (error: RuntimeException) {
-                Log.e(TAG, "Unable to connect to SoundMan host", error)
+                AppLog.error("Unable to connect to SoundMan host", error)
                 false
             }
             handler.post {
                 if (closed) return@post
                 if (!connected || !initializeSessionIfNeeded()) {
                     if (failureReason.startsWith("command connection failed:")) {
-                        Log.e(TAG, "Host command could not connect: ${failureReason.removePrefix("command connection failed: ")}")
+                        AppLog.error("Host command could not connect: ${failureReason.removePrefix("command connection failed: ")}")
                     }
                     publishUnavailable()
                     scheduleReconnect(failureReason)
@@ -187,7 +185,7 @@ class HostPlaybackSource(
         try {
             if (!bridge.isConnected()) {
                 sessionInitialized = false
-                Log.e(TAG, "Unable to connect to SoundMan host")
+                AppLog.error("Unable to connect to SoundMan host")
                 return false
             }
             if (!sessionInitialized) {
@@ -197,13 +195,13 @@ class HostPlaybackSource(
                 try {
                     PreferredDeviceSync.publishAll(applicationContext, ruleStore.readAll().values)
                 } catch (error: Throwable) {
-                    Log.e(TAG, "Failed to republish preferred device rules", error)
+                    AppLog.error("[route] Failed to republish preferred device rules", error)
                 }
             }
             return true
         } catch (error: RuntimeException) {
             sessionInitialized = false
-            Log.e(TAG, "Unable to initialize SoundMan host session", error)
+            AppLog.error("Unable to initialize SoundMan host session", error)
             return false
         }
     }
@@ -212,7 +210,7 @@ class HostPlaybackSource(
         try {
             command(commandId)
         } catch (error: RuntimeException) {
-            Log.e(TAG, "Host command failed: $operation", error)
+            AppLog.error("Host command failed: $operation", error)
             sessionInitialized = false
             publishUnavailable()
             scheduleReconnect("host command failed: $operation")
@@ -224,17 +222,17 @@ class HostPlaybackSource(
         val attempt = reconnectAttempt++
         val delayMs = (RECONNECT_BASE_DELAY_MS shl attempt.coerceAtMost(RECONNECT_MAX_SHIFT)).coerceAtMost(RECONNECT_MAX_DELAY_MS)
         reconnectScheduled = true
-        Log.w(TAG, "Scheduling SoundMan host reconnect attempt=${attempt + 1} delayMs=$delayMs reason=$reason")
+        AppLog.warn("Scheduling SoundMan host reconnect attempt=${attempt + 1} delayMs=$delayMs reason=$reason")
         if (!handler.postDelayed(reconnectRunnable, delayMs)) {
             reconnectScheduled = false
-            Log.e(TAG, "Unable to schedule SoundMan host reconnect")
+            AppLog.error("Unable to schedule SoundMan host reconnect")
         }
     }
 
     private fun armSnapshotWatchdog() {
         handler.removeCallbacks(snapshotWatchdog)
         if (!handler.postDelayed(snapshotWatchdog, SNAPSHOT_WATCHDOG_MS)) {
-            Log.e(TAG, "Unable to arm snapshot watchdog")
+            AppLog.error("Unable to arm snapshot watchdog")
         }
     }
 
@@ -266,12 +264,12 @@ class HostPlaybackSource(
             }
             is SoundManProtocol.Event.ResultAvailable -> publishResult(event.result)
             is SoundManProtocol.Event.HostError -> {
-                Log.e(TAG, "SoundMan host error: ${event.message}")
+                AppLog.error("SoundMan host error: ${event.message}")
                 publishUnavailable()
             }
             is SoundManProtocol.Event.HostClosed -> {
                 sessionInitialized = false
-                Log.e(TAG, "SoundMan host closed: ${event.reason}")
+                AppLog.error("SoundMan host closed: ${event.reason}")
                 publishUnavailable()
                 scheduleReconnect("host closed: ${event.reason}")
             }
@@ -283,8 +281,7 @@ class HostPlaybackSource(
         val apps = snapshot.playback
             .map { entry -> loadApp(entry.packageName, entry.uid) }
             .sortedBy { it.label.lowercase() }
-        Log.i(
-            TAG,
+        AppLog.info(
             "Publishing host snapshot revision=${snapshot.revision} apps=${apps.size} devices=${snapshot.outputDevices.size}",
         )
         publish(ActiveMediaAppsState.Available(apps))
@@ -292,7 +289,7 @@ class HostPlaybackSource(
 
     private fun loadApp(packageName: String, uid: Int): AdjustableApp {
         if (!installedAppsAccess.hasAccess(applicationContext)) {
-            Log.w(TAG, "Skipping package lookup for uid=$uid package=$packageName without installed-apps access")
+            AppLog.warn("Skipping package lookup for uid=$uid package=$packageName without installed-apps access")
             return unknownApp(packageName, uid)
         }
         try {
@@ -304,7 +301,7 @@ class HostPlaybackSource(
                 icon = info.loadIcon(packageManager),
             )
         } catch (error: PackageManager.NameNotFoundException) {
-            Log.w(TAG, "Active uid=$uid package=$packageName is no longer installed", error)
+            AppLog.warn("Active uid=$uid package=$packageName is no longer installed", error)
         }
         return unknownApp(packageName, uid)
     }
@@ -357,7 +354,7 @@ class HostPlaybackSource(
                 if (!closed) action()
             }
         ) {
-            Log.e(TAG, "HostPlaybackSource worker rejected $label")
+            AppLog.error("HostPlaybackSource worker rejected $label")
         }
     }
 
@@ -377,10 +374,10 @@ class HostPlaybackSource(
         worker.quitSafely()
         try {
             worker.join(1_000L)
-            if (worker.isAlive) Log.e(TAG, "Host IPC worker did not stop within timeout")
+            if (worker.isAlive) AppLog.error("Host IPC worker did not stop within timeout")
         } catch (error: InterruptedException) {
             Thread.currentThread().interrupt()
-            Log.e(TAG, "Interrupted while stopping host IPC worker", error)
+            AppLog.error("Interrupted while stopping host IPC worker", error)
         }
     }
 }
