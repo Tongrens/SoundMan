@@ -8,15 +8,17 @@ import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * 给 SoundMan 入口套上和折叠态静音/免打扰同一套 live MiBlur。
+ * 给 SoundMan 入口套上和折叠态音量条同一套 live MiBlur。
  *
  * 动机：官方圆钮的毛玻璃不是 `o3_miui_volume_ringer_bg_blur` 那张静态图。
- * 主题打开 blur 时走 `Util.setRoundRect` + `Util.setMiViewBlurAndBlendColor`，
- * 以及 `MiBlurCompat` 的 window blur；静态 drawable 盖上去颜色和 blur 都会错。
+ * 新系统折叠态音量条走 `Util.isAdvancedMaterialEffective` +
+ * `MiBlurCompat.setOutlineRoundRect` + `Util.setMiViewBackgroundStyle`；
+ * 老系统仍是 `Util.setRoundRect` + `Util.setMiViewBlurAndBlendColor`。
+ * 新路径报错或缺失时回退老路径，新系统上老路径仍然可用。
  *
- * 反射理由：`MiBlurCompat` / `Util` / `RingerButtonRes` / `MiuiColorBlendToken`
- * 只在 `miui.systemui.plugin` ClassLoader 里，编译 classpath 没有这些类，
- * 也没有可链接的公开 SDK。已确认 runtime Context 只能拿到资源，拿不到这些静态方法。
+ * 反射理由：`MiBlurCompat` / `Util` / `RingerButtonRes` / `MiuiColorBlendToken` /
+ * `MiBackgroundStyle` 只在 `miui.systemui.plugin` ClassLoader 里，编译 classpath
+ * 没有这些类，也没有可链接的公开 SDK。
  */
 class OfficialRingerBlur(
     private val pluginClassLoader: ClassLoader,
@@ -24,25 +26,52 @@ class OfficialRingerBlur(
 ) {
     private val classes = ConcurrentHashMap<String, Class<*>>()
     private val methods = ConcurrentHashMap<MethodKey, Method>()
+    private var usedNewMaterialChrome = false
 
     /**
      * 当前主题是否走 live 背景模糊。
      *
+     * 先探新系统 `isAdvancedMaterialEffective` /
+     * `getBackgroundMaterialOpenedInDefaultTheme`，没有再回退老
+     * `getBackgroundBlurOpenedInDefaultTheme`。
+     *
      * `null` 表示探测 API 不存在或调用失败。
      */
     fun themeBlurOpened(context: Context): Boolean? {
+        val types = arrayOf<Class<*>>(Context::class.java)
+        val args = arrayOf<Any?>(context)
         return invokeStatic<Boolean>(
+            VOLUME_UTIL,
+            METHOD_ADVANCED_MATERIAL,
+            types,
+            args,
+            quiet = true,
+        ) ?: invokeStatic<Boolean>(
+            MI_BLUR_COMPAT,
+            METHOD_THEME_MATERIAL_OPENED,
+            types,
+            args,
+            quiet = true,
+        ) ?: invokeStatic(
             MI_BLUR_COMPAT,
             METHOD_THEME_BLUR_OPENED,
-            arrayOf(Context::class.java),
-            arrayOf(context),
+            types,
+            args,
         )
     }
 
     /**
-     * 按折叠态免打扰 **chrome** 套 live blur。
+     * 最近一次 [applyCollapsedChrome] 是否走了新系统 material 路径。
      *
-     * 官方只在 `miui_standard_btn` 上做 `setRoundRect` + `setMiViewBlurAndBlendColor`。
+     * 新路径把 blur 直接打在 chrome 上，不要再叠 backdrop / 静态 blur 图。
+     */
+    fun usedNewMaterialChrome(): Boolean = usedNewMaterialChrome
+
+    /**
+     * 按折叠态音量条 **chrome** 套 live blur。
+     *
+     * 先走新系统 `setOutlineRoundRect` + `setMiViewBackgroundStyle`，
+     * 失败再回退 `setRoundRect` + `setMiViewBlurAndBlendColor`。
      * 不要再叠 `setMiBgBlur` / window blur，叠上去会比官方更深。
      *
      * @param view 圆钮 chrome
@@ -50,19 +79,23 @@ class OfficialRingerBlur(
      * @return blend 调用成功
      */
     fun applyCollapsedChrome(view: View, radiusPx: Int): Boolean {
-        invokeInstanceOrStatic(VOLUME_UTIL, METHOD_SET_ROUND_RECT, view, radiusPx.toFloat())
-        val token = collapsedOffBlendToken()
+        usedNewMaterialChrome = false
+        val token = collapsedOffBlendToken(view.context)
         if (token == null) {
             log(Log.ERROR, TAG, "Official ringer blend token was not resolved", null)
             return false
         }
-        val applied = invokeInstanceOrStatic(
-            VOLUME_UTIL,
-            METHOD_SET_MI_VIEW_BLUR_AND_BLEND,
-            view,
-            1,
-            token,
+        if (applyNewMaterialChrome(view, radiusPx, token)) {
+            usedNewMaterialChrome = true
+            return true
+        }
+        log(
+            Log.INFO,
+            TAG,
+            "New volume-column material chrome unavailable; falling back to legacy MiBlur",
+            null
         )
+        val applied = applyLegacyChrome(view, radiusPx, token)
         if (!applied) {
             log(Log.ERROR, TAG, "Official setMiViewBlurAndBlendColor was not applied", null)
         }
@@ -72,10 +105,11 @@ class OfficialRingerBlur(
     /**
      * 创建官方 `bg_blur` 同款 Backdrop 层。
      *
-     * JADX：`com.miui.blur.sdk.backdrop.a(Context)` + `setBlurEnabled(true)`。
-     * 普通 View 贴 `o3_miui_volume_ringer_bg_blur` 会比 live backdrop 更深。
+     * 新系统折叠态音量条不再用 backdrop；`setMiViewBackgroundStyle` 在就跳过。
+     * 老路径：`com.miui.blur.sdk.backdrop.a(Context)` + `setBlurEnabled(true)`。
      */
     fun createCollapsedBlurLayer(context: Context, radiusPx: Int): View? {
+        if (hasNewMaterialChrome()) return null
         val clazz = loadClass(BACKDROP_BLUR_VIEW) ?: return null
         val created = try {
             clazz.getConstructor(Context::class.java).newInstance(context)
@@ -94,25 +128,95 @@ class OfficialRingerBlur(
         return view
     }
 
-    private fun collapsedOffBlendToken(): Any? {
-        val fromRes = invokeStatic<Any>(
+    private fun applyNewMaterialChrome(view: View, radiusPx: Int, token: Any): Boolean {
+        val glass = collapsedGlassToken() ?: return false
+        val radius = radiusPx.toFloat()
+        val outlined = invokeClass(
+            MI_BLUR_COMPAT,
+            METHOD_SET_OUTLINE_ROUND_RECT,
+            arrayOf(view, radius, true),
+            quiet = true,
+        ) != FAILED || invokeClass(
+            MI_BLUR_COMPAT,
+            METHOD_SET_BLUR_OUTLINE_ROUND_RECT,
+            arrayOf(view, radius),
+            quiet = true,
+        ) != FAILED
+        if (!outlined) return false
+        return invokeClass(
+            VOLUME_UTIL,
+            METHOD_SET_MI_VIEW_BACKGROUND_STYLE,
+            arrayOf(view, 1, token, glass),
+            quiet = true,
+        ) != FAILED
+    }
+
+    private fun applyLegacyChrome(view: View, radiusPx: Int, token: Any): Boolean {
+        invokeInstanceOrStatic(VOLUME_UTIL, METHOD_SET_ROUND_RECT, view, radiusPx.toFloat())
+        return invokeInstanceOrStatic(
+            VOLUME_UTIL,
+            METHOD_SET_MI_VIEW_BLUR_AND_BLEND,
+            view,
+            1,
+            token,
+        )
+    }
+
+    private fun collapsedOffBlendToken(context: Context): Any? {
+        val booleanType = Boolean::class.javaPrimitiveType!!
+        val isBionics = invokeStatic<Boolean>(
+            VOLUME_UTIL,
+            METHOD_BIONICS_MATERIAL,
+            arrayOf<Class<*>>(Context::class.java),
+            arrayOf(context),
+            quiet = true,
+        ) == true
+        invokeStatic<Any>(
             RINGER_BUTTON_RES,
             METHOD_GET_BUTTON_BG_BLEND,
-            arrayOf(
-                Boolean::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-            ),
+            arrayOf<Class<*>>(booleanType, booleanType, booleanType, booleanType),
+            arrayOf(false, true, false, isBionics),
+            quiet = true,
+        )?.let { return it }
+        invokeStatic<Any>(
+            RINGER_BUTTON_RES,
+            METHOD_GET_BUTTON_BG_BLEND,
+            arrayOf<Class<*>>(booleanType, booleanType, booleanType),
             arrayOf(false, true, false),
-        )
-        if (fromRes != null) return fromRes
+            quiet = true,
+        )?.let { return it }
         val holder = loadClass(MIUI_COLOR_BLEND_TOKEN) ?: return null
         val instance = runCatching {
             holder.getField(FIELD_INSTANCE).get(null)
         }.onFailure { error ->
             log(Log.ERROR, TAG, "Unable to read $MIUI_COLOR_BLEND_TOKEN.$FIELD_INSTANCE", error)
         }.getOrNull() ?: return null
-        return invokeOn(holder, instance, METHOD_GET_RINGER_BG_OFF, emptyArray())
+        val result = invokeOn(holder, instance, METHOD_GET_RINGER_BG_OFF, emptyArray())
+        return if (result === FAILED) null else result
+    }
+
+    private fun collapsedGlassToken(): Any? {
+        val holder = loadClass(MI_BACKGROUND_STYLE, quiet = true) ?: return null
+        val instance = runCatching {
+            holder.getField(FIELD_INSTANCE).get(null)
+        }.getOrNull() ?: return null
+        val result = invokeOn(
+            holder,
+            instance,
+            METHOD_GET_COLLAPSED_CLOSED_GLASS,
+            emptyArray(),
+            quiet = true,
+        )
+        return if (result == null || result === FAILED) null else result
+    }
+
+    private fun hasNewMaterialChrome(): Boolean {
+        val clazz = loadClass(VOLUME_UTIL, quiet = true) ?: return false
+        return clazz.methods.any { method ->
+            method.name == METHOD_SET_MI_VIEW_BACKGROUND_STYLE && method.parameterTypes.size == 4
+        } || clazz.declaredMethods.any { method ->
+            method.name == METHOD_SET_MI_VIEW_BACKGROUND_STYLE && method.parameterTypes.size == 4
+        }
     }
 
     private fun invokeInstanceOrStatic(className: String, methodName: String, vararg args: Any?): Boolean {
@@ -120,14 +224,25 @@ class OfficialRingerBlur(
         return invokeOn(clazz, null, methodName, args) != FAILED
     }
 
+    private fun invokeClass(
+        className: String,
+        methodName: String,
+        args: Array<out Any?>,
+        quiet: Boolean,
+    ): Any? {
+        val clazz = loadClass(className, quiet) ?: return FAILED
+        return invokeOn(clazz, null, methodName, args, quiet)
+    }
+
     private fun <T> invokeStatic(
         className: String,
         methodName: String,
         parameterTypes: Array<Class<*>>,
         args: Array<Any?>,
+        quiet: Boolean = false,
     ): T? {
-        val clazz = loadClass(className) ?: return null
-        val result = invokeOn(clazz, null, methodName, args) ?: return null
+        val clazz = loadClass(className, quiet) ?: return null
+        val result = invokeOn(clazz, null, methodName, args, quiet) ?: return null
         if (result === FAILED) return null
         @Suppress("UNCHECKED_CAST")
         return result as? T
@@ -138,23 +253,45 @@ class OfficialRingerBlur(
         target: Any?,
         methodName: String,
         args: Array<out Any?>,
+        quiet: Boolean = false,
     ): Any? {
-        val method = resolveMethod(clazz, methodName, args) ?: return FAILED
+        val method = resolveMethod(clazz, methodName, args, quiet) ?: return FAILED
         return try {
             method.invoke(target, *args)
         } catch (error: InvocationTargetException) {
-            log(Log.ERROR, TAG, "Official blur call failed: ${clazz.name}.$methodName", error.cause ?: error)
+            if (!quiet) {
+                log(
+                    Log.ERROR,
+                    TAG,
+                    "Official blur call failed: ${clazz.name}.$methodName",
+                    error.cause ?: error
+                )
+            }
             FAILED
         } catch (error: ReflectiveOperationException) {
-            log(Log.ERROR, TAG, "Official blur call failed: ${clazz.name}.$methodName", error)
+            if (!quiet) {
+                log(Log.ERROR, TAG, "Official blur call failed: ${clazz.name}.$methodName", error)
+            }
             FAILED
         } catch (error: IllegalArgumentException) {
-            log(Log.ERROR, TAG, "Official blur arguments rejected: ${clazz.name}.$methodName", error)
+            if (!quiet) {
+                log(
+                    Log.ERROR,
+                    TAG,
+                    "Official blur arguments rejected: ${clazz.name}.$methodName",
+                    error
+                )
+            }
             FAILED
         }
     }
 
-    private fun resolveMethod(clazz: Class<*>, methodName: String, args: Array<out Any?>): Method? {
+    private fun resolveMethod(
+        clazz: Class<*>,
+        methodName: String,
+        args: Array<out Any?>,
+        quiet: Boolean = false,
+    ): Method? {
         val key = MethodKey(clazz, methodName, args.size)
         methods[key]?.let { return it }
         val match = clazz.methods.firstOrNull { method ->
@@ -163,12 +300,14 @@ class OfficialRingerBlur(
             method.name == methodName && parametersMatch(method.parameterTypes, args)
         }
         if (match == null) {
-            log(
-                Log.ERROR,
-                TAG,
-                "Official blur method missing: ${clazz.name}.$methodName args=${args.size}",
-                null,
-            )
+            if (!quiet) {
+                log(
+                    Log.ERROR,
+                    TAG,
+                    "Official blur method missing: ${clazz.name}.$methodName args=${args.size}",
+                    null,
+                )
+            }
             return null
         }
         match.isAccessible = true
@@ -197,12 +336,14 @@ class OfficialRingerBlur(
         }
     }
 
-    private fun loadClass(name: String): Class<*>? {
+    private fun loadClass(name: String, quiet: Boolean = false): Class<*>? {
         classes[name]?.let { return it }
         return try {
             pluginClassLoader.loadClass(name).also { classes[name] = it }
         } catch (error: ClassNotFoundException) {
-            log(Log.ERROR, TAG, "Official blur class missing: $name", error)
+            if (!quiet) {
+                log(Log.ERROR, TAG, "Official blur class missing: $name", error)
+            }
             null
         }
     }
@@ -218,16 +359,24 @@ class OfficialRingerBlur(
         val FAILED = Any()
 
         const val MI_BLUR_COMPAT = "miui.systemui.util.MiBlurCompat"
+        const val MI_BACKGROUND_STYLE = "miui.systemui.util.MiBackgroundStyle"
         const val VOLUME_UTIL = "com.android.systemui.miui.volume.Util"
         const val RINGER_BUTTON_RES = "com.android.systemui.miui.volume.RingerButtonRes"
         const val MIUI_COLOR_BLEND_TOKEN = "miui.systemui.util.MiuiColorBlendToken"
         const val BACKDROP_BLUR_VIEW = "com.miui.blur.sdk.backdrop.a"
         const val FIELD_INSTANCE = "INSTANCE"
         const val METHOD_THEME_BLUR_OPENED = "getBackgroundBlurOpenedInDefaultTheme"
+        const val METHOD_THEME_MATERIAL_OPENED = "getBackgroundMaterialOpenedInDefaultTheme"
+        const val METHOD_ADVANCED_MATERIAL = "isAdvancedMaterialEffective"
+        const val METHOD_BIONICS_MATERIAL = "isBionicsAdvancedMaterialEnabled"
         const val METHOD_SET_ROUND_RECT = "setRoundRect"
+        const val METHOD_SET_OUTLINE_ROUND_RECT = "setOutlineRoundRect"
+        const val METHOD_SET_BLUR_OUTLINE_ROUND_RECT = "setBlurOutlineRoundRect"
+        const val METHOD_SET_MI_VIEW_BACKGROUND_STYLE = "setMiViewBackgroundStyle"
         const val METHOD_SET_MI_VIEW_BLUR_AND_BLEND = "setMiViewBlurAndBlendColor"
         const val METHOD_GET_BUTTON_BG_BLEND = "getButtonBgBlendColor"
         const val METHOD_GET_RINGER_BG_OFF = "getRINGER_BG_OFF"
+        const val METHOD_GET_COLLAPSED_CLOSED_GLASS = "getVOLUMPANEL_COLLAPSED_CLOSED_GLASS_TOKEN"
         const val METHOD_SET_BLUR_ENABLED = "setBlurEnabled"
         const val METHOD_SET_CORNER_RADIUS = "setCornerRadius"
     }

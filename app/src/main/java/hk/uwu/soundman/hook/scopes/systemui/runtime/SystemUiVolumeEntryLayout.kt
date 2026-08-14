@@ -88,10 +88,12 @@ object SystemUiVolumeEntryLayout {
     /**
      * 官方 live blur 的插件类名。
      *
+     * 新系统折叠态音量条走 `MiBackgroundStyle`；老系统仍用 backdrop。
      * 主题打开 blur 时必须走这些类，禁止再用静态 blur 图冒充。
      */
     val LIVE_BLUR_CLASS_NAMES: List<String> = listOf(
         "miui.systemui.util.MiBlurCompat",
+        "miui.systemui.util.MiBackgroundStyle",
         "com.android.systemui.miui.volume.Util",
         "com.android.systemui.miui.volume.RingerButtonRes",
         "com.miui.blur.sdk.backdrop.a",

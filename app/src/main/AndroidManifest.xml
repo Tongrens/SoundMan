@@ -61,6 +61,15 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".overlay.OverlayLaunchActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleInstance"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.SoundMan.Overlay" />
+
         <service
             android:name=".overlay.OverlayHostService"
             android:exported="false"

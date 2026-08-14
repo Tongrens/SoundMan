@@ -8,7 +8,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.net.toUri
-import hk.uwu.soundman.MainActivity.Companion.ACTION_OPEN_OVERLAY
 import hk.uwu.soundman.data.InstalledAppsAccess
 import hk.uwu.soundman.data.PermissionCatalog
 import hk.uwu.soundman.log.AppLog
@@ -17,7 +16,7 @@ import hk.uwu.soundman.overlay.OverlayOpenRequest
 import hk.uwu.soundman.ui.HomeScreen
 
 /**
- * 模块主页。音量调节只出现在悬浮窗；侧栏入口仍走 [ACTION_OPEN_OVERLAY] 直接打开悬浮窗。
+ * 模块主页。音量调节只出现在悬浮窗；侧栏入口走 [hk.uwu.soundman.overlay.OverlayLaunchActivity]，不经过本页。
  */
 class MainActivity : ComponentActivity() {
     private var finishAfterOverlay = false
@@ -64,7 +63,9 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.action == ACTION_OPEN_OVERLAY) {
-            requestOverlay()
+            OverlayHostService.startShow(this, OverlayOpenRequest.fromIntent(intent))
+            // 主页任务若已被拉到前台，立刻退到后台，避免半透明浮层后面露出主屏。
+            moveTaskToBack(true)
         }
     }
 
@@ -89,14 +90,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showSystemOverlay() {
-        val overlayIntent = Intent(this, OverlayHostService::class.java)
-            .setAction(OverlayHostService.ACTION_SHOW)
-        OverlayOpenRequest.fromIntent(intent).putInto(overlayIntent)
-        startForegroundService(overlayIntent)
+        OverlayHostService.startShow(this, OverlayOpenRequest.fromIntent(intent))
         if (finishAfterOverlay && !homeVisible) finish()
     }
 
     companion object {
-        const val ACTION_OPEN_OVERLAY = "hk.uwu.soundman.action.OPEN_OVERLAY"
+        const val ACTION_OPEN_OVERLAY = OverlayOpenRequest.ACTION_OPEN_OVERLAY
     }
 }

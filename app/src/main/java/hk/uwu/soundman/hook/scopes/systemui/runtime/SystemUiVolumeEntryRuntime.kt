@@ -321,10 +321,11 @@ class SystemUiVolumeEntryRuntime(
      */
     fun openOverlay(context: Context, trigger: String, sourceView: View) {
         if (closing.get()) return
-        val intent = Intent(ACTION_OPEN_OVERLAY)
-            .setComponent(ComponentName(MODULE_PACKAGE, MAIN_ACTIVITY_CLASS))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        OverlayOpenRequest(fromVolumeSidebar = true).putInto(intent)
+        val launch = OverlayOpenRequest.sidebarActivityLaunch()
+        val intent = Intent(launch.action)
+            .setComponent(ComponentName(launch.packageName, launch.className))
+            .addFlags(launch.flags)
+        OverlayOpenRequest.fromExtras(launch.extras).putInto(intent)
         try {
             log(Log.INFO, TAG, "[systemui] $trigger startActivity begin component=${intent.component}", null)
             context.startActivity(intent)
@@ -610,9 +611,6 @@ class SystemUiVolumeEntryRuntime(
 
     companion object {
         private const val TAG = "SoundMan.SystemUi"
-        private const val MODULE_PACKAGE = "hk.uwu.soundman"
-        private const val MAIN_ACTIVITY_CLASS = "hk.uwu.soundman.MainActivity"
-        private const val ACTION_OPEN_OVERLAY = "hk.uwu.soundman.action.OPEN_OVERLAY"
         private const val ENTRY_TAG = "hk.uwu.soundman:volume_entry"
         private const val VOLUME_DIALOG_VIEW_CLASS =
             "com.android.systemui.miui.volume.MiuiVolumeDialogView"
@@ -785,7 +783,7 @@ class SystemUiVolumeEntryRuntime(
                 log,
             )
             val moduleContext = targetContext.createPackageContext(
-                MODULE_PACKAGE,
+                OverlayOpenRequest.MODULE_PACKAGE,
                 Context.CONTEXT_IGNORE_SECURITY,
             )
             val contentDescription = moduleContext.getString(R.string.systemui_volume_entry_content_description)
@@ -830,10 +828,20 @@ class SystemUiVolumeEntryRuntime(
                 log(Log.ERROR, TAG, "Theme live blur is on but official chrome blend failed; skip insertion", null)
                 return false
             }
-            blurLayer.background = blurBackground
+            val newMaterial = liveApplied && officialBlur?.usedNewMaterialChrome() == true
+            blurLayer.background = if (newMaterial) null else blurBackground
             if (liveApplied) {
                 chrome.background = null
-                log(Log.INFO, TAG, "Applied official chrome MiBlur; kept ringer blur drawable under it", null)
+                if (newMaterial) {
+                    log(Log.INFO, TAG, "Applied official volume-column material chrome", null)
+                } else {
+                    log(
+                        Log.INFO,
+                        TAG,
+                        "Applied official chrome MiBlur; kept ringer blur drawable under it",
+                        null
+                    )
+                }
             } else {
                 if (buttonBackground == null && blurBackground == null) {
                     log(Log.ERROR, TAG, "Volume entry official backgrounds missing; skip insertion", null)

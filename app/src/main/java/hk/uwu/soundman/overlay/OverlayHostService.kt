@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
@@ -201,6 +202,18 @@ class OverlayHostService : Service() {
     companion object {
         const val ACTION_SHOW = "hk.uwu.soundman.action.SHOW_OVERLAY"
         const val ACTION_HIDE = "hk.uwu.soundman.action.HIDE_OVERLAY"
+
+        /**
+         * 启动浮层前台服务。
+         *
+         * Activity 跳板和主页按钮共用这一条路径，避免两处各自拼 Intent。
+         */
+        fun startShow(context: Context, request: OverlayOpenRequest) {
+            val overlayIntent =
+                Intent(context, OverlayHostService::class.java).setAction(ACTION_SHOW)
+            request.putInto(overlayIntent)
+            context.startForegroundService(overlayIntent)
+        }
     }
 }
 

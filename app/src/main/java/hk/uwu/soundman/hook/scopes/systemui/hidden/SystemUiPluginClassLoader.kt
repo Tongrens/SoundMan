@@ -31,7 +31,9 @@ class SystemUiPluginClassLoader {
      */
     fun packageName(pluginInstance: Any): String {
         val instanceClass = pluginInstance.javaClass
-        val result = invoke(methodOf(instanceClass, GET_PACKAGE), pluginInstance)
+        val result = runCatching {
+            invoke(methodOf(instanceClass, GET_PACKAGE), pluginInstance)
+        }.getOrNull() ?: invoke(methodOf(instanceClass, "getPackageName"), pluginInstance)
         return result as? String
             ?: throw IllegalStateException(
                 "Method $GET_PACKAGE() on ${instanceClass.name} returned non-String: " +
@@ -46,20 +48,39 @@ class SystemUiPluginClassLoader {
      * @return factory `get()` 返回的 ClassLoader
      */
     fun classLoader(pluginInstance: Any): ClassLoader {
-        val factory = fieldValue(pluginInstance, FIELD_PLUGIN_FACTORY)
-            ?: throw IllegalStateException(
-                "Field $FIELD_PLUGIN_FACTORY on ${pluginInstance.javaClass.name} is null",
+        val factory = runCatching {
+            fieldValue(pluginInstance, FIELD_PLUGIN_FACTORY)
+                ?: throw IllegalStateException(
+                    "Field $FIELD_PLUGIN_FACTORY on ${pluginInstance.javaClass.name} is null",
+                )
+        }.getOrNull()
+        if (factory == null) {
+            val pluginData =
+                fieldValue(pluginInstance, "pluginData") ?: throw IllegalStateException(
+                    "Field pluginData on ${pluginInstance.javaClass.name} is null",
+                )
+            val contextWrapper = fieldValue(pluginData, "context") ?: throw IllegalStateException(
+                "Field context on ${pluginData.javaClass.name} is null",
             )
-        val classLoaderFactory = fieldValue(factory, FIELD_CLASS_LOADER_FACTORY)
-            ?: throw IllegalStateException(
-                "Field $FIELD_CLASS_LOADER_FACTORY on ${factory.javaClass.name} is null",
+            val result =
+                invoke(methodOf(contextWrapper.javaClass, "getClassLoader"), contextWrapper)
+            return result as? ClassLoader ?: throw IllegalStateException(
+                "Method getClassLoader() on ${contextWrapper.javaClass.name} returned non-ClassLoader: " +
+                        "${result?.javaClass?.name}",
             )
-        val result = invoke(methodOf(classLoaderFactory.javaClass, METHOD_GET), classLoaderFactory)
-        return result as? ClassLoader
-            ?: throw IllegalStateException(
-                "Method $METHOD_GET() on ${classLoaderFactory.javaClass.name} returned non-ClassLoader: " +
-                    "${result?.javaClass?.name}",
-            )
+        } else {
+            val classLoaderFactory = fieldValue(factory, FIELD_CLASS_LOADER_FACTORY)
+                ?: throw IllegalStateException(
+                    "Field $FIELD_CLASS_LOADER_FACTORY on ${factory.javaClass.name} is null",
+                )
+            val result =
+                invoke(methodOf(classLoaderFactory.javaClass, METHOD_GET), classLoaderFactory)
+            return result as? ClassLoader
+                ?: throw IllegalStateException(
+                    "Method $METHOD_GET() on ${classLoaderFactory.javaClass.name} returned non-ClassLoader: " +
+                            "${result?.javaClass?.name}",
+                )
+        }
     }
 
     private fun fieldValue(instance: Any, name: String): Any? =

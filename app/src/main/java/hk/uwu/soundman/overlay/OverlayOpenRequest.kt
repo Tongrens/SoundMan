@@ -36,6 +36,45 @@ data class OverlayOpenRequest(
         /** 侧栏入口打开浮层时写入的 extra 键。 */
         const val EXTRA_FROM_VOLUME_SIDEBAR = "hk.uwu.soundman.extra.FROM_VOLUME_SIDEBAR"
 
+        /** SystemUI 侧栏打开浮层时使用的 action。 */
+        const val ACTION_OPEN_OVERLAY = "hk.uwu.soundman.action.OPEN_OVERLAY"
+
+        /** 模块包名。SystemUI 进程里必须用显式 ComponentName。 */
+        const val MODULE_PACKAGE = "hk.uwu.soundman"
+
+        /**
+         * 侧栏打开浮层时的 trampoline Activity。
+         *
+         * 不能走 [hk.uwu.soundman.MainActivity]：它是 `singleTop`，只带
+         * `FLAG_ACTIVITY_NEW_TASK` 会把已有主页任务拉到前台，半透明浮层后面就会露出主屏。
+         */
+        const val LAUNCH_ACTIVITY_CLASS = "hk.uwu.soundman.overlay.OverlayLaunchActivity"
+
+        /**
+         * SystemUI 侧栏打开浮层的 Activity 约定。
+         *
+         * 空 taskAffinity 的 trampoline 加上 NEW_TASK，不会加入主页任务。
+         * EXCLUDE_FROM_RECENTS / NO_ANIMATION / NO_USER_ACTION 避免把主页 recents 项顶上来。
+         */
+        fun sidebarActivityLaunch(): OverlayActivityLaunch = OverlayActivityLaunch(
+            packageName = MODULE_PACKAGE,
+            className = LAUNCH_ACTIVITY_CLASS,
+            action = ACTION_OPEN_OVERLAY,
+            flags = sidebarActivityFlags(),
+            extras = OverlayOpenRequest(fromVolumeSidebar = true).extras(),
+        )
+
+        /**
+         * 侧栏 trampoline 的启动 flags。
+         *
+         * 不含 CLEAR_TASK / CLEAR_TOP：那会拆掉已有主页任务。
+         */
+        fun sidebarActivityFlags(): Int =
+            Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS or
+                    Intent.FLAG_ACTIVITY_NO_ANIMATION or
+                    Intent.FLAG_ACTIVITY_NO_USER_ACTION
+
         /**
          * 从 Intent 读取打开约定。
          *
@@ -93,4 +132,23 @@ data class OverlayOpenRequest(
 data class DismissKeyStroke(
     val action: Int,
     val keyCode: Int,
+)
+
+/**
+ * SystemUI 打开浮层时要 startActivity 的目标。
+ *
+ * 纯数据，JVM 单测不依赖 Intent stub 也能核对 className / flags。
+ *
+ * @param packageName 模块包名
+ * @param className trampoline Activity 全名
+ * @param action [OverlayOpenRequest.ACTION_OPEN_OVERLAY]
+ * @param flags [OverlayOpenRequest.sidebarActivityFlags]
+ * @param extras 与 [OverlayOpenRequest.extras] 相同
+ */
+data class OverlayActivityLaunch(
+    val packageName: String,
+    val className: String,
+    val action: String,
+    val flags: Int,
+    val extras: Map<String, Boolean>,
 )

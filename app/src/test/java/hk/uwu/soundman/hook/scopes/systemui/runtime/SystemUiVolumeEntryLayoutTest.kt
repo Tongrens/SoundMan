@@ -78,6 +78,7 @@ class SystemUiVolumeEntryLayoutTest {
         assertEquals(
             listOf(
                 "miui.systemui.util.MiBlurCompat",
+                "miui.systemui.util.MiBackgroundStyle",
                 "com.android.systemui.miui.volume.Util",
                 "com.android.systemui.miui.volume.RingerButtonRes",
                 "com.miui.blur.sdk.backdrop.a",
