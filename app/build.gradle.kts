@@ -59,21 +59,14 @@ android {
     }
 
     buildTypes {
-        val releaseSigning = signingConfigs.getByName("release")
-        val canSign = releaseSigning.storeFile?.exists() == true &&
-                !releaseSigning.storePassword.isNullOrBlank()
         getByName("debug") {
-            if (canSign) {
-                signingConfig = releaseSigning
-            }
+            signingConfig = signingConfigs.getByName("release")
         }
         release {
             optimization {
                 enable = false
             }
-            if (canSign) {
-                signingConfig = releaseSigning
-            }
+            signingConfig = signingConfigs.getByName("release")
             versionNameSuffix = gradle.extra["versionSuffix"].toString()
         }
     }
@@ -96,10 +89,11 @@ androidComponents {
         val exportApk = tasks.register<Sync>("export${variantName}Apk") {
             from(variant.artifacts.get(SingleArtifact.APK))
             include("*.apk")
-            rename { "SoundMan-v$finalVersionName.apk" }
+            rename { "SoundMan-v${finalVersionName}.apk" }
             into(layout.buildDirectory.dir("outputs/renamed-apk/${variant.name}"))
         }
-        tasks.matching { it.name == "assemble$variantName" }.configureEach {
+
+        tasks.matching { it.name == "assemble${variantName}" }.configureEach {
             finalizedBy(exportApk)
         }
     }
