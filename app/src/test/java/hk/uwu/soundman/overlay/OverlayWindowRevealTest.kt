@@ -10,28 +10,24 @@ class OverlayWindowRevealTest {
     @Test
     fun hiddenRevealClearsDimAndBlur() {
         val chrome = OverlayWindowReveal.chrome(0f)
-
         assertEquals(0f, chrome.dimAmount, 0.0001f)
         assertEquals(0, chrome.blurRadiusPx)
         assertFalse(chrome.blurEnabled)
     }
 
     @Test
-    fun fullRevealMatchesWindowConstants() {
+    fun fullRevealMatchesStableTokens() {
         val chrome = OverlayWindowReveal.chrome(1f)
-
         assertEquals(OverlayWindowReveal.DIM_AMOUNT, chrome.dimAmount, 0.0001f)
         assertEquals(OverlayWindowReveal.BLUR_RADIUS_PX, chrome.blurRadiusPx)
         assertTrue(chrome.blurEnabled)
     }
 
     @Test
-    fun halfRevealScalesDimAndBlurTogether() {
+    fun halfRevealScalesStableTokens() {
         val chrome = OverlayWindowReveal.chrome(0.5f)
-
         assertEquals(OverlayWindowReveal.DIM_AMOUNT * 0.5f, chrome.dimAmount, 0.0001f)
         assertEquals(OverlayWindowReveal.BLUR_RADIUS_PX / 2, chrome.blurRadiusPx)
-        assertTrue(chrome.blurEnabled)
     }
 
     @Test

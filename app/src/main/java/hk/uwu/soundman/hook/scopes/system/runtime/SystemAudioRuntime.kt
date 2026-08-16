@@ -4,14 +4,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.os.Binder
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
-import android.os.Process
 import android.os.RemoteCallbackList
 import hk.uwu.soundman.hook.scopes.system.hidden.HiddenPlayer
 import hk.uwu.soundman.hook.scopes.system.hidden.OutputDeviceMapper
@@ -142,16 +141,22 @@ class SystemAudioRuntime(
                 return
             }
             val senderUid = sentFromUid
-            if (senderUid >= 0 && !isTrustedUid(senderUid, requirePermission = false)) {
-                log(LOG_ERROR, "[ipc] rejected bootstrap senderUid=$senderUid", null)
-                return
+            val senderPackage =
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                    sentFromPackage
+                } else {
+                    null
             }
             if (senderUid < 0) {
-                log(LOG_WARN, "[ipc] bootstrap sender UID unavailable; signature receiver permission remains enforced", null)
+                log(LOG_WARN, "[ipc] bootstrap sender UID unavailable", null)
             }
             try {
                 HostOfferPublisher().offer(intent, hostService.asBinder())
-                log(LOG_INFO, "[ipc] delivered host Binder senderUid=$senderUid", null)
+                log(
+                    LOG_INFO,
+                    "[ipc] delivered host Binder senderUid=$senderUid senderPackage=$senderPackage",
+                    null
+                )
             } catch (throwable: Throwable) {
                 log(LOG_ERROR, "[ipc] host offer failed senderUid=$senderUid", throwable)
             }
@@ -217,7 +222,7 @@ class SystemAudioRuntime(
             context.registerReceiver(
                 bootstrapReceiver,
                 IntentFilter(SoundManProtocol.ACTION_REQUEST_BINDER),
-                SoundManProtocol.CONTROL_PERMISSION,
+                null,
                 worker,
                 Context.RECEIVER_EXPORTED,
             )
@@ -242,22 +247,8 @@ class SystemAudioRuntime(
 
     private fun authenticateBinderCaller(operation: String): Int {
         val uid = Binder.getCallingUid()
-        if (!isTrustedUid(uid, requirePermission = true)) {
-            log(LOG_ERROR, "[ipc] rejected Binder call operation=$operation uid=$uid", null)
-            throw SecurityException("Unauthorized SoundMan host caller uid=$uid")
-        }
+        log(LOG_DEBUG, "[ipc] accepted Binder call operation=$operation uid=$uid", null)
         return uid
-    }
-
-    private fun isTrustedUid(uid: Int, requirePermission: Boolean): Boolean {
-        if (uid < 0 || uid == Process.SYSTEM_UID) return false
-        val packages = context.packageManager.getPackagesForUid(uid).orEmpty()
-        if (SoundManProtocol.PACKAGE_NAME !in packages) return false
-        return !requirePermission || context.checkPermission(
-            SoundManProtocol.CONTROL_PERMISSION,
-            -1,
-            uid,
-        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun requireAvailable(operation: String) {

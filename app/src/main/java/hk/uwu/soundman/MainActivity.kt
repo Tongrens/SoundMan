@@ -8,8 +8,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.net.toUri
+import hk.uwu.soundman.data.APP_SETTINGS_PREFERENCES_NAME
 import hk.uwu.soundman.data.InstalledAppsAccess
 import hk.uwu.soundman.data.PermissionCatalog
+import hk.uwu.soundman.data.SharedPreferencesAppSettingsStore
+import hk.uwu.soundman.data.SystemUiAppSettingsSync
 import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.overlay.OverlayHostService
 import hk.uwu.soundman.overlay.OverlayOpenRequest
@@ -54,8 +57,28 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         maybeRequestInstalledAppsPermission()
         homeVisible = true
+        val settingsStore = SharedPreferencesAppSettingsStore(
+            preferences = getSharedPreferences(APP_SETTINGS_PREFERENCES_NAME, MODE_PRIVATE),
+            systemUiBuiltinPanelMirror = { enabled ->
+                SystemUiAppSettingsSync.persistBuiltinPanelEnabled(this, enabled)
+            },
+        )
+        try {
+            SystemUiAppSettingsSync.persistBuiltinPanelEnabled(
+                this,
+                settingsStore.read().systemUiBuiltinVolumePanelEnabled,
+            )
+        } catch (error: RuntimeException) {
+            AppLog.error(
+                "Unable to synchronize SystemUI builtin panel setting during startup",
+                error
+            )
+        }
         setContent {
-            HomeScreen(onOpenOverlay = ::requestOverlay)
+            HomeScreen(
+                settingsStore = settingsStore,
+                onOpenOverlay = ::requestOverlay,
+            )
         }
     }
 

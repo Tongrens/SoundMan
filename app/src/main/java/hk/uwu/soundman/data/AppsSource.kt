@@ -52,6 +52,7 @@ class HostPlaybackSource(
     private val connectExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "SoundMan.ConnectWait").apply { isDaemon = true }
     }
+    private val workerDispatchLock = Any()
 
     @Volatile
     private var state: ActiveMediaAppsState = ActiveMediaAppsState.Available(emptyList())
@@ -97,10 +98,9 @@ class HostPlaybackSource(
     )
 
     init {
-        handler.post {
-            if (closed) return@post
+        check(postToWorker("initial connection") {
             connectThenOnWorker("initial connection failed")
-        }
+        }) { "HostPlaybackSource worker rejected initial connection" }
     }
 
     override fun observe(observer: (ActiveMediaAppsState) -> Unit): () -> Unit {
@@ -144,12 +144,11 @@ class HostPlaybackSource(
     private fun enqueueCommand(operation: String, command: (String) -> Unit): String {
         check(!closed) { "HostPlaybackSource is closed" }
         val commandId = UUID.randomUUID().toString()
-        check(handler.post {
-            if (closed) return@post
+        check(postToWorker(operation) {
             cancelScheduledReconnect()
             if (bridge.isConnected() && sessionInitialized) {
                 runCommand(operation, commandId, command)
-                return@post
+                return@postToWorker
             }
             connectThenOnWorker("command connection failed: $operation") {
                 runCommand(operation, commandId, command)
@@ -159,25 +158,38 @@ class HostPlaybackSource(
     }
 
     private fun connectThenOnWorker(failureReason: String, onConnected: () -> Unit = {}) {
-        connectExecutor.execute {
-            val connected = try {
-                bridge.connect()
-            } catch (error: RuntimeException) {
-                AppLog.error("Unable to connect to SoundMan host", error)
-                false
-            }
-            handler.post {
-                if (closed) return@post
-                if (!connected || !initializeSessionIfNeeded()) {
-                    if (failureReason.startsWith("command connection failed:")) {
-                        AppLog.error("Host command could not connect: ${failureReason.removePrefix("command connection failed: ")}")
-                    }
-                    publishUnavailable()
-                    scheduleReconnect(failureReason)
-                    return@post
+        try {
+            connectExecutor.execute {
+                val connected = try {
+                    bridge.connect()
+                } catch (error: RuntimeException) {
+                    if (closed) return@execute
+                    AppLog.error("Unable to connect to SoundMan host", error)
+                    false
                 }
-                onConnected()
+                postToWorker("connection result: $failureReason") {
+                    if (!connected || !initializeSessionIfNeeded()) {
+                        if (failureReason.startsWith("command connection failed:")) {
+                            AppLog.error(
+                                "Host command could not connect: ${
+                                    failureReason.removePrefix(
+                                        "command connection failed: "
+                                    )
+                                }"
+                            )
+                        }
+                        publishUnavailable()
+                        scheduleReconnect(failureReason)
+                        return@postToWorker
+                    }
+                    onConnected()
+                }
             }
+        } catch (error: RuntimeException) {
+            if (!closed) AppLog.error(
+                "Host connect executor rejected request: $failureReason",
+                error
+            )
         }
     }
 
@@ -223,17 +235,14 @@ class HostPlaybackSource(
         val delayMs = (RECONNECT_BASE_DELAY_MS shl attempt.coerceAtMost(RECONNECT_MAX_SHIFT)).coerceAtMost(RECONNECT_MAX_DELAY_MS)
         reconnectScheduled = true
         AppLog.warn("Scheduling SoundMan host reconnect attempt=${attempt + 1} delayMs=$delayMs reason=$reason")
-        if (!handler.postDelayed(reconnectRunnable, delayMs)) {
+        if (!postDelayedToWorker("host reconnect", reconnectRunnable, delayMs)) {
             reconnectScheduled = false
-            AppLog.error("Unable to schedule SoundMan host reconnect")
         }
     }
 
     private fun armSnapshotWatchdog() {
         handler.removeCallbacks(snapshotWatchdog)
-        if (!handler.postDelayed(snapshotWatchdog, SNAPSHOT_WATCHDOG_MS)) {
-            AppLog.error("Unable to arm snapshot watchdog")
-        }
+        postDelayedToWorker("snapshot watchdog", snapshotWatchdog, SNAPSHOT_WATCHDOG_MS)
     }
 
     private fun cancelSnapshotWatchdog() {
@@ -348,25 +357,36 @@ class HostPlaybackSource(
         const val SNAPSHOT_WATCHDOG_MS = 2_000L
     }
 
-    private fun postToWorker(label: String, action: () -> Unit) {
-        if (closed) return
-        if (!handler.post {
+    private fun postToWorker(label: String, action: () -> Unit): Boolean {
+        val accepted = synchronized(workerDispatchLock) {
+            if (closed) return false
+            handler.post {
                 if (!closed) action()
             }
-        ) {
-            AppLog.error("HostPlaybackSource worker rejected $label")
         }
+        if (!accepted && !closed) AppLog.error("HostPlaybackSource worker rejected $label")
+        return accepted
+    }
+
+    private fun postDelayedToWorker(label: String, action: Runnable, delayMs: Long): Boolean {
+        val accepted = synchronized(workerDispatchLock) {
+            if (closed) return false
+            handler.postDelayed({ if (!closed) action.run() }, delayMs)
+        }
+        if (!accepted && !closed) AppLog.error("HostPlaybackSource worker rejected delayed $label")
+        return accepted
     }
 
     @Synchronized
     override fun close() {
-        if (closed) return
-        closed = true
-        handler.removeCallbacksAndMessages(null)
+        synchronized(workerDispatchLock) {
+            if (closed) return
+            closed = true
+            handler.removeCallbacksAndMessages(null)
+        }
         reconnectScheduled = false
-        cancelSnapshotWatchdog()
-        connectExecutor.shutdownNow()
         bridge.close()
+        connectExecutor.shutdownNow()
         mainHandler.removeCallbacksAndMessages(null)
         observers.clear()
         deviceObservers.clear()

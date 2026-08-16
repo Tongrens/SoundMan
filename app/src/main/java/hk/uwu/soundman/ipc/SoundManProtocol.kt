@@ -3,6 +3,9 @@ package hk.uwu.soundman.ipc
 import android.content.Intent
 import android.os.Bundle
 import android.os.IBinder
+import hk.uwu.soundman.ipc.SoundManProtocol.MAX_ROUTE_CANDIDATES
+import hk.uwu.soundman.ipc.SoundManProtocol.VERSION
+import hk.uwu.soundman.ipc.SoundManProtocol.requestBinderIntent
 import hk.uwu.soundman.model.AppAudioRule
 import hk.uwu.soundman.model.AudioDeviceIdentity
 import hk.uwu.soundman.model.AudioOutputDevice
@@ -230,6 +233,16 @@ object SoundManProtocol {
         putString(KEY_DEVICE_NAME, device.productName)
         putCandidates(device.candidates)
     }
+
+    fun encodeTargetIdentity(target: OutputTarget): String = when (target) {
+        OutputTarget.FollowSystem -> "follow-system"
+        is OutputTarget.Device -> "${target.type.name}:${target.productName}:" +
+                target.candidates.joinToString(";") { "${it.internalType}@${it.address}" }
+    }
+
+    fun encodeDeviceIdentity(device: AudioOutputDevice): String =
+        "${device.type.name}:${device.productName}:" +
+                device.candidates.joinToString(";") { "${it.internalType}@${it.address}" }
 
     fun decodeDevice(bundle: Bundle): AudioOutputDevice = AudioOutputDevice(
         type = decodeDeviceType(bundle.requiredString(KEY_DEVICE_CATEGORY)),

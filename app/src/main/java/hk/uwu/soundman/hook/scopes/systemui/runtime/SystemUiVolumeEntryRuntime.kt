@@ -31,7 +31,10 @@ import java.util.concurrent.locks.ReentrantLock
 /** 在 HyperOS 紧凑音量侧栏的音量条上方插入 SoundMan 圆钮入口。 */
 class SystemUiVolumeEntryRuntime(
     private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
+    private val builtinPanelEnabled: () -> Boolean = { false },
 ) {
+    private val officialDismissHook = SystemUiOfficialDismissHookBridge(log)
+    private val builtinPanel = SystemUiBuiltinVolumePanel(log, officialDismissHook::dismiss)
     private val trackedEntries = ArrayList<TrackedEntry>()
     private val pendingInsertions = ArrayList<PendingInsertion>()
     private val closing = AtomicBoolean(false)
@@ -49,6 +52,11 @@ class SystemUiVolumeEntryRuntime(
      */
     fun attachPluginClassLoader(pluginClassLoader: ClassLoader) {
         officialBlur = OfficialRingerBlur(pluginClassLoader, log)
+    }
+
+    /** 缓存 hook 框架已捕获的官方 controller 及其公开 dismissH 入口。 */
+    fun captureOfficialDismissController(controller: Any, dismiss: (Any) -> Unit) {
+        officialDismissHook.capture(controller, dismiss)
     }
 
     /** 在各目标 View 所属 UI Looper 上同步移除入口；失败时保留追踪状态供后续重试。 */
@@ -187,7 +195,7 @@ class SystemUiVolumeEntryRuntime(
     }
 
     private fun cleanupOnUiLooper(uiLooper: Looper, entry: View): Boolean {
-        if (Looper.myLooper() === uiLooper) return cleanupEntry(entry)
+        if (Looper.myLooper() === uiLooper) return cleanupEntryAndPanel(entry)
 
         val completed = CountDownLatch(1)
         val failure = AtomicReference<Throwable?>()
@@ -201,7 +209,7 @@ class SystemUiVolumeEntryRuntime(
                 taskState.set(CleanupTaskState.RUNNING)
             }
             try {
-                if (!cleanupEntry(entry)) {
+                if (!cleanupEntryAndPanel(entry)) {
                     failure.set(IllegalStateException("SoundMan volume entry cleanup failed"))
                 }
             } catch (throwable: Throwable) {
@@ -261,6 +269,15 @@ class SystemUiVolumeEntryRuntime(
         }
     }
 
+    private fun cleanupEntryAndPanel(entry: View): Boolean {
+        try {
+            builtinPanel.closeFor(entry)
+        } catch (throwable: Throwable) {
+            log(Log.ERROR, TAG, "Failed to close builtin panel during entry cleanup", throwable)
+        }
+        return cleanupEntry(entry)
+    }
+
     private fun cleanupEntry(entry: View): Boolean {
         return try {
             (entry.parent as? ViewGroup)?.removeView(entry)
@@ -316,6 +333,55 @@ class SystemUiVolumeEntryRuntime(
         }
     }
 
+    /** 根据动态设置选择同窗原生页或稳定悬浮层；读取或挂载失败时始终回退。 */
+    fun openPanel(context: Context, trigger: String, sourceView: View) {
+        if (closing.get()) return
+        val enabled = try {
+            builtinPanelEnabled()
+        } catch (error: Throwable) {
+            log(
+                Log.ERROR,
+                TAG,
+                "Unable to read builtin panel preference; falling back to overlay",
+                error
+            )
+            false
+        }
+        try {
+            SystemUiBuiltinPanelPolicy.open(
+                builtinEnabled = enabled,
+                mountBuiltin = {
+                    try {
+                        builtinPanel.mount(sourceView) {
+                            try {
+                                openOverlay(context, "$trigger-device-route", sourceView)
+                            } catch (throwable: Throwable) {
+                                log(
+                                    Log.ERROR,
+                                    TAG,
+                                    "Device-route overlay callback failed",
+                                    throwable
+                                )
+                            }
+                        }
+                    } catch (throwable: Throwable) {
+                        log(Log.ERROR, TAG, "Builtin panel mount callback failed", throwable)
+                        false
+                    }
+                },
+                openOverlay = {
+                    try {
+                        openOverlay(context, trigger, sourceView)
+                    } catch (throwable: Throwable) {
+                        log(Log.ERROR, TAG, "Overlay fallback callback failed", throwable)
+                    }
+                },
+            )
+        } catch (throwable: Throwable) {
+            log(Log.ERROR, TAG, "Volume panel boundary callback failed", throwable)
+        }
+    }
+
     /**
      * 从 SystemUI/插件进程打开 SoundMan 面板，并关掉音量侧栏。
      */
@@ -335,7 +401,7 @@ class SystemUiVolumeEntryRuntime(
             log(Log.ERROR, TAG, "SoundMan overlay activity was not found trigger=$trigger", error)
         } catch (error: SecurityException) {
             log(Log.ERROR, TAG, "SystemUI is not allowed to open the SoundMan overlay trigger=$trigger", error)
-        } catch (error: RuntimeException) {
+        } catch (error: Throwable) {
             log(Log.ERROR, TAG, "Unable to open the SoundMan overlay trigger=$trigger", error)
         }
     }
@@ -349,7 +415,7 @@ class SystemUiVolumeEntryRuntime(
         OverlayOpenRequest.volumeSidebarDismissSequence().forEach { stroke ->
             val dispatched = try {
                 root.dispatchKeyEvent(KeyEvent(stroke.action, stroke.keyCode))
-            } catch (error: RuntimeException) {
+            } catch (error: Throwable) {
                 log(
                     Log.ERROR,
                     TAG,
@@ -379,17 +445,33 @@ class SystemUiVolumeEntryRuntime(
             log(Log.ERROR, TAG, "Volume expand update skipped: root is not a View", null)
             return
         }
-        val entry = findInsertedEntry(root)
-        if (entry == null) {
-            log(
-                Log.WARN,
-                TAG,
-                "Volume entry not found for expanded=$expanded root=${describeView(root)}",
-                null,
-            )
-            return
+        val uiLooper = root.handler?.looper ?: Looper.myLooper() ?: Looper.getMainLooper()
+        val update = Runnable {
+            try {
+                if (closing.get()) {
+                    log(Log.WARN, TAG, "Volume expand update skipped: runtime is closing", null)
+                    return@Runnable
+                }
+                val entry = findInsertedEntry(root)
+                if (entry == null) {
+                    log(
+                        Log.WARN,
+                        TAG,
+                        "Volume entry not found for expanded=$expanded root=${describeView(root)}",
+                        null,
+                    )
+                    return@Runnable
+                }
+                entry.visibility = SystemUiVolumeEntryLayout.entryVisibility(expanded)
+            } catch (throwable: Throwable) {
+                log(Log.ERROR, TAG, "Volume expand update failed for expanded=$expanded", throwable)
+            }
         }
-        entry.visibility = SystemUiVolumeEntryLayout.entryVisibility(expanded)
+        if (Looper.myLooper() === uiLooper) {
+            update.run()
+        } else if (!Handler(uiLooper).post(update)) {
+            log(Log.ERROR, TAG, "Volume expand update rejected by target View UI Looper", null)
+        }
     }
 
     private fun findInsertedEntry(root: View): View? = findExistingEntry(root)
@@ -471,8 +553,8 @@ class SystemUiVolumeEntryRuntime(
                         log,
                         { closing.get() },
                         ::track,
-                        ::cleanupEntry,
-                        ::openOverlay,
+                        ::cleanupEntryAndPanel,
+                        ::openPanel,
                         officialBlur,
                     )
                 }
@@ -1386,5 +1468,37 @@ class SystemUiVolumeEntryRuntime(
             val bottomMargin: Int,
             val gravity: Int,
         )
+    }
+}
+
+private class SystemUiOfficialDismissHookBridge(
+    private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
+) {
+    private var controller = WeakReference<Any>(null)
+    private var dismiss: ((Any) -> Unit)? = null
+
+    fun capture(owner: Any, action: (Any) -> Unit) {
+        controller = WeakReference(owner)
+        dismiss = action
+    }
+
+    fun dismiss(): Boolean {
+        val owner = controller.get()
+        val action = dismiss
+        if (owner == null || action == null) {
+            log(Log.ERROR, TAG, "Official dismiss hook has no live VolumePanelViewController", null)
+            return false
+        }
+        return try {
+            action(owner)
+            true
+        } catch (throwable: Throwable) {
+            log(Log.ERROR, TAG, "Official dismiss hook controller callback failed", throwable)
+            false
+        }
+    }
+
+    companion object {
+        private const val TAG = "SoundMan.SystemUiDismiss"
     }
 }

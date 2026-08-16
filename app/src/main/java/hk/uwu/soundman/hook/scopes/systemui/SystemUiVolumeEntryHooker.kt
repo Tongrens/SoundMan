@@ -4,11 +4,15 @@ import android.util.Log
 import android.view.View
 import com.highcapable.kavaref.KavaRef.Companion.resolve
 import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
+import hk.uwu.soundman.data.AppSettingsDefaults
+import hk.uwu.soundman.data.AppSettingsKeys
+import hk.uwu.soundman.data.SYSTEM_UI_SETTINGS_PREFERENCES_NAME
 import hk.uwu.soundman.hook.core.YLog
 import hk.uwu.soundman.hook.scopes.systemui.hidden.SystemUiPluginClassLoader
 import hk.uwu.soundman.hook.scopes.systemui.hidden.SystemUiPluginClassLoaderAttach
 import hk.uwu.soundman.hook.scopes.systemui.hidden.SystemUiPluginHookTargets
 import hk.uwu.soundman.hook.scopes.systemui.runtime.SystemUiVolumeEntryRuntime
+import java.lang.invoke.MethodHandles
 
 /**
  * 在 HyperOS 音量侧栏的静音/免打扰按钮下方插入 SoundMan 圆形入口。
@@ -19,7 +23,10 @@ import hk.uwu.soundman.hook.scopes.systemui.runtime.SystemUiVolumeEntryRuntime
  * 缺 PluginInstance、提取失败或缺音量类只打日志，不得让异常打穿 SystemUI。
  */
 object SystemUiVolumeEntryHooker : YukiBaseHooker() {
-    private val runtime = SystemUiVolumeEntryRuntime(log = ::writeLog)
+    private val runtime = SystemUiVolumeEntryRuntime(
+        log = ::writeLog,
+        builtinPanelEnabled = ::isBuiltinPanelEnabled,
+    )
     private val pluginClassLoaderReader = SystemUiPluginClassLoader()
     private val pluginClassLoaderAttach = SystemUiPluginClassLoaderAttach()
 
@@ -56,13 +63,20 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
             methods.forEach { method ->
                 method.hook {
                     after {
-                        if (throwable != null) return@after
-                        val pluginInstance = instanceOrNull
-                        if (pluginInstance == null) {
-                            YLog.error("Plugin watch has no instance: ${target.className}#$methodName")
-                            return@after
+                        try {
+                            if (throwable != null) return@after
+                            val pluginInstance = instanceOrNull
+                            if (pluginInstance == null) {
+                                YLog.error("Plugin watch has no instance: ${target.className}#$methodName")
+                                return@after
+                            }
+                            attachPluginClassLoader(pluginInstance)
+                        } catch (error: Throwable) {
+                            YLog.error(
+                                "Plugin watch callback failed: class=${target.className} method=$methodName",
+                                error,
+                            )
                         }
-                        attachPluginClassLoader(pluginInstance)
                     }
                 }
             }
@@ -95,6 +109,52 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
 
     private fun installVolumeHooks(pluginClassLoader: ClassLoader) {
         HOOK_TARGETS.forEach { target -> hookTarget(target, pluginClassLoader) }
+        installOfficialControllerCaptureHook(pluginClassLoader)
+    }
+
+    private fun installOfficialControllerCaptureHook(pluginClassLoader: ClassLoader) {
+        val clazz = runCatching { CLASS_VOLUME_PANEL_VIEW_CONTROLLER.toClass(pluginClassLoader) }
+            .onFailure {
+                YLog.warn(
+                    "Official controller capture class missing: $CLASS_VOLUME_PANEL_VIEW_CONTROLLER",
+                    it
+                )
+            }
+            .getOrNull() ?: return
+        val intType = Int::class.javaPrimitiveType ?: error("Int primitive type unavailable")
+        val dismissMethod = clazz.methods.firstOrNull { method ->
+            method.name == METHOD_DISMISS_H && method.parameterTypes.contentEquals(arrayOf(intType))
+        } ?: run {
+            YLog.error("Official controller dismissH(int) missing: $CLASS_VOLUME_PANEL_VIEW_CONTROLLER")
+            return
+        }
+        val dismissHandle = runCatching { MethodHandles.publicLookup().unreflect(dismissMethod) }
+            .onFailure {
+                YLog.error(
+                    "Unable to bind official controller dismissH MethodHandle",
+                    it
+                )
+            }
+            .getOrNull() ?: return
+        val resolved = clazz.resolve().optional()
+        val showMethods = safeResolve(
+            block = { resolved.method { name = METHOD_SHOW_H } },
+            onFailure = { error -> YLog.error("Official controller showH hook missing", error) },
+        )
+        showMethods.forEach { method ->
+            method.hook {
+                after {
+                    val controller = instanceOrNull ?: run {
+                        YLog.error("Official controller capture has no instance")
+                        return@after
+                    }
+                    runtime.captureOfficialDismissController(controller) { owner ->
+                        dismissHandle.invokeWithArguments(owner, OFFICIAL_DISMISS_REASON)
+                    }
+                }
+            }
+            YLog.info("Installed official controller capture hook: ${method.self.toGenericString()}")
+        }
     }
 
     private fun hookTarget(target: SystemUiVolumeEntryHookTarget, pluginClassLoader: ClassLoader) {
@@ -126,20 +186,27 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
             methods.forEach { method ->
                 method.hook {
                     after {
-                        if (throwable != null) return@after
-                        if (methodName == METHOD_UPDATE_EXPANDED_H) {
-                            val expanded = args.getOrNull(0) as? Boolean
-                            if (expanded == null) {
-                                YLog.error(
-                                    "updateExpandedH missing Boolean argument: " +
-                                        "class=${target.className} arg0=${args.getOrNull(0)?.javaClass?.name}",
-                                )
+                        try {
+                            if (throwable != null) return@after
+                            if (methodName == METHOD_UPDATE_EXPANDED_H) {
+                                val expanded = args.getOrNull(0) as? Boolean
+                                if (expanded == null) {
+                                    YLog.error(
+                                        "updateExpandedH missing Boolean argument: " +
+                                                "class=${target.className} arg0=${args.getOrNull(0)?.javaClass?.name}",
+                                    )
+                                    return@after
+                                }
+                                runtime.applyExpanded(instance as? View, expanded)
                                 return@after
                             }
-                            runtime.applyExpanded(instance as? View, expanded)
-                            return@after
+                            runtime.scheduleInsertion(instance, "${clazz.name}#$methodName")
+                        } catch (error: Throwable) {
+                            YLog.error(
+                                "Volume hook callback failed: class=${target.className} method=$methodName",
+                                error,
+                            )
                         }
-                        runtime.scheduleInsertion(instance, "${clazz.name}#$methodName")
                     }
                 }
             }
@@ -149,6 +216,27 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
                 )
             }
         }
+    }
+
+    private fun isBuiltinPanelEnabled(): Boolean = try {
+        val modulePrefs = prefs(SYSTEM_UI_SETTINGS_PREFERENCES_NAME)
+        val entries = modulePrefs.all()
+        val value = entries[AppSettingsKeys.SYSTEM_UI_BUILTIN_VOLUME_PANEL]
+        val enabled = when (value) {
+            null -> AppSettingsDefaults.SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED
+            is Boolean -> value
+            else -> error(
+                "Invalid ${AppSettingsKeys.SYSTEM_UI_BUILTIN_VOLUME_PANEL} type=${value.javaClass.name}",
+            )
+        }
+        YLog.info(
+            "SystemUI builtin panel preference enabled=$enabled " +
+                    "available=${modulePrefs.isPreferencesAvailable} keys=${entries.keys.sorted()}",
+        )
+        enabled
+    } catch (error: Throwable) {
+        YLog.error("Unable to read SystemUI builtin panel setting through Yuki prefs", error)
+        AppSettingsDefaults.SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED
     }
 
     private fun writeLog(priority: Int, tag: String, message: String, throwable: Throwable?) {
@@ -194,9 +282,14 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
 
     private const val CLASS_RINGER_MODE_LAYOUT =
         "com.android.systemui.miui.volume.MiuiRingerModeLayout"
+    private const val CLASS_VOLUME_PANEL_VIEW_CONTROLLER =
+        "com.android.systemui.miui.volume.VolumePanelViewController"
     private const val METHOD_FINISH_INFLATE = "onFinishInflate"
     private const val METHOD_ATTACHED_TO_WINDOW = "onAttachedToWindow"
     private const val METHOD_UPDATE_EXPANDED_H = "updateExpandedH"
+    private const val METHOD_SHOW_H = "showH"
+    private const val METHOD_DISMISS_H = "dismissH"
+    private const val OFFICIAL_DISMISS_REASON = 8
 }
 
 /**

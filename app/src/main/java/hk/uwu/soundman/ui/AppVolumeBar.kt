@@ -3,13 +3,14 @@ package hk.uwu.soundman.ui
 import android.graphics.drawable.Drawable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -25,10 +26,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Size
+
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -57,8 +57,10 @@ object AppVolumeBarHit {
     const val VOLUME_MIN = 0f
     const val VOLUME_MAX = 100f
     const val RUBBER_BAND_COEFFICIENT = 0.55f
-    const val EDGE_PULL_GAIN = 0.4f
-    const val EDGE_PULL_MAX = 0.06f
+    const val SHELL_HEIGHT_DP = 60f
+    const val SHELL_RADIUS_DP = 22f
+    const val FILL_END_RADIUS_DP = 3.5f
+    const val INTERNAL_OVERFLOW_MAX_DP = 3f
 
     /**
      * 点是否落在条内部右侧三点区。
@@ -128,17 +130,32 @@ object AppVolumeBarHit {
         return (1f - 1f / (overflow * coefficient / dimension + 1f)) * dimension
     }
 
-    /**
-     * 越出 0/100 时条的拉伸量，范围内为 0。
-     */
-    fun edgePull(volume: Float): Float {
+    /** 越界反馈仅用于外壳内部的端部高光，返回值严格限制在短距离内。 */
+    fun internalOverflowOffsetDp(volume: Float): Float {
         require(volume.isFinite()) { "volume must be finite" }
-        val overflow = when {
+        val signedOverflow = when {
             volume > VOLUME_MAX -> volume - VOLUME_MAX
-            volume < VOLUME_MIN -> VOLUME_MIN - volume
+            volume < VOLUME_MIN -> volume - VOLUME_MIN
             else -> 0f
         }
-        return (overflow / VOLUME_MAX * EDGE_PULL_GAIN).coerceIn(0f, EDGE_PULL_MAX)
+        if (signedOverflow == 0f) return 0f
+        val magnitude = rubberBandOverflow(
+            overflow = kotlin.math.abs(signedOverflow),
+            dimension = VOLUME_MAX,
+            coefficient = RUBBER_BAND_COEFFICIENT,
+        ) / VOLUME_MAX * INTERNAL_OVERFLOW_MAX_DP
+        return if (signedOverflow > 0f) magnitude else -magnitude
+    }
+
+    /** 音量进度的纯逻辑几何；右端在所有非零进度下保持固定小圆角。 */
+    internal fun fillGeometry(fillFraction: Float): VolumeFillGeometry {
+        require(fillFraction in 0f..1f) { "fillFraction must be in 0..1" }
+        return VolumeFillGeometry(
+            visible = fillFraction > 0f,
+            widthFraction = fillFraction,
+            leftRadiusDp = SHELL_RADIUS_DP,
+            rightRadiusDp = FILL_END_RADIUS_DP,
+        )
     }
 
     /**
@@ -189,14 +206,37 @@ object AppVolumeBarHit {
     }
 }
 
-private val BarShape = RoundedCornerShape(22.dp)
-private val TrackColor = Color.White.copy(alpha = 0.18f)
+internal data class VolumeFillGeometry(
+    val visible: Boolean,
+    val widthFraction: Float,
+    val leftRadiusDp: Float,
+    val rightRadiusDp: Float,
+)
+
+internal enum class VolumeBarLayer {
+    Track,
+    Progress,
+    Icons,
+    Border,
+}
+
+internal val VolumeBarLayerOrder = listOf(
+    VolumeBarLayer.Track,
+    VolumeBarLayer.Progress,
+    VolumeBarLayer.Icons,
+    VolumeBarLayer.Border,
+)
+
+private val TrackColor = Color(0x4D262A34)
 private val FillColor = Color.White
 private val InBarIconAlpha = 0.92f
 private const val DRAG_DAMPING = 0.84f
 private const val DRAG_STIFFNESS = 1600f
 private const val REST_DAMPING = 0.86f
 private const val REST_STIFFNESS = 700f
+private const val PRESSED_SCALE = 0.992f
+private const val PRESS_DAMPING = 0.88f
+private const val PRESS_STIFFNESS = 1000f
 
 /**
  * 系统音量栏同款大圆角方条，横放。
@@ -221,6 +261,7 @@ fun AppVolumeBar(
     val currentOnMore by rememberUpdatedState(onMoreClick)
     val currentVolume by rememberUpdatedState(volumePercent)
     val iconBitmap = remember(appIcon) { appIcon.toBitmap(96, 96).asImageBitmap() }
+    var pressed by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
     var dragVolume by remember { mutableFloatStateOf(0f) }
     val displayedFraction by animateFloatAsState(
@@ -235,27 +276,28 @@ fun AppVolumeBar(
         ),
         label = "volumeFill",
     )
-    val edgePull by animateFloatAsState(
-        targetValue = if (dragging) AppVolumeBarHit.edgePull(dragVolume) else 0f,
-        animationSpec = spring(dampingRatio = DRAG_DAMPING, stiffness = DRAG_STIFFNESS),
-        label = "edgePull",
-    )
     val pressScale by animateFloatAsState(
-        targetValue = if (dragging) 0.985f else 1f,
-        animationSpec = spring(dampingRatio = 0.9f, stiffness = 500f),
+        targetValue = if (pressed) PRESSED_SCALE else 1f,
+        animationSpec = spring(dampingRatio = PRESS_DAMPING, stiffness = PRESS_STIFFNESS),
         label = "volumePress",
     )
 
+    val shellRadius = AppVolumeBarHit.SHELL_RADIUS_DP.dp
+    val borderColor = Color.White.copy(alpha = 0.18f)
     Box(
         modifier
             .fillMaxWidth()
-            .height(60.dp)
+            .height(AppVolumeBarHit.SHELL_HEIGHT_DP.dp)
             .graphicsLayer {
-                scaleX = pressScale * (1f + edgePull)
-                scaleY = pressScale * (1f - edgePull * 0.35f)
+                scaleX = pressScale
+                scaleY = pressScale
             }
-            .clip(BarShape)
-            .background(TrackColor)
+            .blurMaterial(
+                purpose = BlurMaterialPurpose.VolumeTrack,
+                cornerRadius = shellRadius,
+                tint = TrackColor,
+                border = null,
+            )
             .semantics {
                 if (contentDescription != null) {
                     this.contentDescription = contentDescription
@@ -265,109 +307,158 @@ fun AppVolumeBar(
             .pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    val width = size.width.toFloat()
-                    if (width <= 0f) return@awaitEachGesture
-                    val slop = viewConfiguration.touchSlop
-                    val startVolume = currentVolume
-                    val startedOnMore = AppVolumeBarHit.isMoreHit(down.position.x, width)
-                    var releasedWithoutDrag = false
-                    var slopX = down.position.x
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull { it.id == down.id }
-                            ?: return@awaitEachGesture
-                        if (!change.pressed) {
-                            releasedWithoutDrag = true
-                            break
+                    pressed = true
+                    try {
+                        val width = size.width.toFloat()
+                        if (width <= 0f) return@awaitEachGesture
+                        val slop = viewConfiguration.touchSlop
+                        val startVolume = currentVolume
+                        val startedOnMore = AppVolumeBarHit.isMoreHit(down.position.x, width)
+                        var releasedWithoutDrag = false
+                        var slopX = down.position.x
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                                ?: return@awaitEachGesture
+                            if (!change.pressed) {
+                                releasedWithoutDrag = true
+                                break
+                            }
+                            val distance = hypot(
+                                change.position.x - down.position.x,
+                                change.position.y - down.position.y,
+                            )
+                            if (AppVolumeBarHit.isDragPastSlop(distance, slop)) {
+                                slopX = change.position.x
+                                change.consume()
+                                break
+                            }
                         }
-                        val distance = hypot(
-                            change.position.x - down.position.x,
-                            change.position.y - down.position.y,
-                        )
-                        if (AppVolumeBarHit.isDragPastSlop(distance, slop)) {
-                            slopX = change.position.x
+                        if (releasedWithoutDrag) {
+                            if (startedOnMore) currentOnMore()
+                            return@awaitEachGesture
+                        }
+                        var lastPercent = startVolume
+                        fun applyDrag(deltaX: Float, barWidth: Float) {
+                            val volume =
+                                AppVolumeBarHit.volumeFromRelativeDrag(
+                                    startVolume,
+                                    deltaX,
+                                    barWidth
+                                )
+                            dragVolume = volume
+                            val percent = AppVolumeBarHit.committedPercent(volume)
+                            if (percent != lastPercent) {
+                                lastPercent = percent
+                                currentOnVolumeChange(percent)
+                            }
+                        }
+                        dragging = true
+                        applyDrag(slopX - down.position.x, width)
+                        drag(down.id) { change ->
+                            val dragWidth = size.width.toFloat()
+                            if (dragWidth > 0f) {
+                                applyDrag(change.position.x - down.position.x, dragWidth)
+                            }
                             change.consume()
-                            break
                         }
+                        val finished = AppVolumeBarHit.committedPercent(dragVolume)
+                        if (finished != lastPercent) currentOnVolumeChange(finished)
+                        currentOnFinished()
+                    } finally {
+                        dragging = false
+                        pressed = false
                     }
-                    if (releasedWithoutDrag) {
-                        if (startedOnMore) currentOnMore()
-                        return@awaitEachGesture
-                    }
-                    var lastPercent = startVolume
-                    fun applyDrag(deltaX: Float, barWidth: Float) {
-                        val volume =
-                            AppVolumeBarHit.volumeFromRelativeDrag(startVolume, deltaX, barWidth)
-                        dragVolume = volume
-                        val percent = AppVolumeBarHit.committedPercent(volume)
-                        if (percent != lastPercent) {
-                            lastPercent = percent
-                            currentOnVolumeChange(percent)
-                        }
-                    }
-                    dragging = true
-                    applyDrag(slopX - down.position.x, width)
-                    drag(down.id) { change ->
-                        val dragWidth = size.width.toFloat()
-                        if (dragWidth > 0f) {
-                            applyDrag(change.position.x - down.position.x, dragWidth)
-                        }
-                        change.consume()
-                    }
-                    dragging = false
-                    val finished = AppVolumeBarHit.committedPercent(dragVolume)
-                    if (finished != lastPercent) currentOnVolumeChange(finished)
-                    currentOnFinished()
                 }
             },
     ) {
+        Box(Modifier.fillMaxSize()) {
+            val fillFraction = displayedFraction.coerceIn(0f, 1f)
+            val fillGeometry = AppVolumeBarHit.fillGeometry(fillFraction)
+            if (fillGeometry.visible) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val fillWidth = size.width * fillGeometry.widthFraction
+                    val leftRadius = minOf(
+                        fillGeometry.leftRadiusDp.dp.toPx(),
+                        fillWidth / 2f,
+                        size.height / 2f,
+                    )
+                    val rightRadius = minOf(
+                        fillGeometry.rightRadiusDp.dp.toPx(),
+                        fillWidth / 2f,
+                        size.height / 2f,
+                    )
+                    val fillPath = volumeFillPath(
+                        width = fillWidth,
+                        height = size.height,
+                        leftRadius = leftRadius,
+                        rightRadius = rightRadius,
+                    )
+                    drawPath(fillPath, FillColor)
+                }
+            }
+            Image(
+                bitmap = iconBitmap,
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 14.dp)
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(10.dp)),
+                alpha = InBarIconAlpha,
+            )
+            val moreCoverage = AppVolumeBarHit.moreIconFillCoverage(fillFraction)
+            val moreTint = lerp(Color.White, Color.Black, moreCoverage).copy(alpha = InBarIconAlpha)
+            Box(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .fillMaxWidth(AppVolumeBarHit.MORE_HIT_FRACTION)
+                    .semantics {
+                        this.contentDescription = moreContentDescription
+                        onClick {
+                            currentOnMore()
+                            true
+                        }
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = MoreHorizVector,
+                    contentDescription = null,
+                    modifier = Modifier.size(26.dp),
+                    tint = moreTint,
+                )
+            }
+        }
         Box(
             Modifier
                 .matchParentSize()
-                .drawBehind {
-                    val fillWidth = size.width * displayedFraction.coerceIn(0f, 1f)
-                    if (fillWidth <= 0f) return@drawBehind
-                    drawRoundRect(
-                        color = FillColor,
-                        size = Size(fillWidth, size.height),
-                        cornerRadius = CornerRadius(4.dp.toPx()),
-                    )
-                },
+                .glassBorder(
+                    purpose = BlurMaterialPurpose.VolumeTrack,
+                    cornerRadius = shellRadius,
+                    color = borderColor,
+                ),
         )
-        Image(
-            bitmap = iconBitmap,
-            contentDescription = null,
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .padding(start = 14.dp)
-                .size(36.dp)
-                .clip(RoundedCornerShape(10.dp)),
-            alpha = InBarIconAlpha,
-        )
-        val moreCoverage = AppVolumeBarHit.moreIconFillCoverage(displayedFraction.coerceIn(0f, 1f))
-        val moreTint = lerp(Color.White, Color.Black, moreCoverage).copy(alpha = InBarIconAlpha)
-        Box(
-            Modifier
-                .align(Alignment.CenterEnd)
-                .fillMaxHeight()
-                .fillMaxWidth(AppVolumeBarHit.MORE_HIT_FRACTION)
-                .semantics {
-                    this.contentDescription = moreContentDescription
-                    onClick {
-                        currentOnMore()
-                        true
-                    }
-                },
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = MoreHorizVector,
-                contentDescription = null,
-                modifier = Modifier.size(26.dp),
-                tint = moreTint,
-            )
-        }
     }
+}
+
+private fun volumeFillPath(
+    width: Float,
+    height: Float,
+    leftRadius: Float,
+    rightRadius: Float,
+): Path = Path().apply {
+    moveTo(leftRadius, 0f)
+    lineTo(width - rightRadius, 0f)
+    quadraticTo(width, 0f, width, rightRadius)
+    lineTo(width, height - rightRadius)
+    quadraticTo(width, height, width - rightRadius, height)
+    lineTo(leftRadius, height)
+    quadraticTo(0f, height, 0f, height - leftRadius)
+    lineTo(0f, leftRadius)
+    quadraticTo(0f, 0f, leftRadius, 0f)
+    close()
 }
 
 /** 横三点，放在横条右侧。 */

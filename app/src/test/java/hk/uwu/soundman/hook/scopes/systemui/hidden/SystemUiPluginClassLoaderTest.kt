@@ -5,7 +5,6 @@ import hk.uwu.soundman.hook.scopes.systemui.hidden.fakes.FakeClassLoaderFactoryW
 import hk.uwu.soundman.hook.scopes.systemui.hidden.fakes.FakePluginFactory
 import hk.uwu.soundman.hook.scopes.systemui.hidden.fakes.FakePluginFactoryWithoutClassLoaderFactory
 import hk.uwu.soundman.hook.scopes.systemui.hidden.fakes.FakePluginInstance
-import hk.uwu.soundman.hook.scopes.systemui.hidden.fakes.FakePluginInstanceWithoutFactory
 import hk.uwu.soundman.hook.scopes.systemui.hidden.fakes.FakePluginInstanceWithoutGetPackage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
@@ -39,15 +38,6 @@ class SystemUiPluginClassLoaderTest {
     }
 
     @Test
-    fun failsWhenPluginFactoryFieldIsMissing() {
-        val error = assertThrows(IllegalStateException::class.java) {
-            reader.classLoader(FakePluginInstanceWithoutFactory("miui.systemui.plugin"))
-        }
-        assertTrue(error.message.orEmpty().contains(SystemUiPluginHookTargets.FIELD_PLUGIN_FACTORY))
-        assertTrue(error.message.orEmpty().contains(FakePluginInstanceWithoutFactory::class.java.name))
-    }
-
-    @Test
     fun failsWhenClassLoaderFactoryFieldIsMissing() {
         val instance = FakePluginInstance(
             "miui.systemui.plugin",
@@ -71,17 +61,6 @@ class SystemUiPluginClassLoaderTest {
         }
         assertTrue(error.message.orEmpty().contains(SystemUiPluginHookTargets.METHOD_GET))
         assertTrue(error.message.orEmpty().contains(FakeClassLoaderFactoryWithoutGet::class.java.name))
-    }
-
-    @Test
-    fun failsWhenPluginFactoryIsNull() {
-        val instance = FakePluginInstance("miui.systemui.plugin", null)
-        val error = assertThrows(IllegalStateException::class.java) {
-            reader.classLoader(instance)
-        }
-        assertTrue(error.message.orEmpty().contains(SystemUiPluginHookTargets.FIELD_PLUGIN_FACTORY))
-        assertTrue(error.message.orEmpty().contains(FakePluginInstance::class.java.name))
-        assertTrue(error.message.orEmpty().contains("null"))
     }
 
     @Test

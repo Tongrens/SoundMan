@@ -5,6 +5,13 @@
     <string name="home_status_channel">渠道</string>
     <string name="home_git_branch">分支</string>
     <string name="home_open_overlay">開啟音量面板</string>
+    <string name="home_settings">設定</string>
+    <string name="settings_title">設定</string>
+    <string name="settings_back">返回</string>
+    <string name="settings_smooth_corners">平滑圓角</string>
+    <string name="settings_smooth_corners_summary">為主要玻璃卡片和面板使用 MIUIX 超橢圓圓角</string>
+    <string name="settings_volume_percent">顯示音量百分比</string>
+    <string name="settings_volume_percent_summary">在每個應用程式音量列上方顯示目前百分比</string>
     <string name="home_xposed_active">模組已啟用</string>
     <string name="home_xposed_inactive">模組未啟用</string>
     <string name="home_xposed_inactive_hint">請在 Xposed 管理器中啟用模組，並勾選系統框架、系統介面以及其他需要生效的應用程式</string>

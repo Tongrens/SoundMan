@@ -1,0 +1,131 @@
+package hk.uwu.soundman.data
+
+import android.content.Context
+import android.content.SharedPreferences
+import com.highcapable.yukihookapi.hook.factory.prefs
+import hk.uwu.soundman.log.AppLog
+
+internal const val APP_SETTINGS_PREFERENCES_NAME = "soundman_app_settings"
+internal const val SYSTEM_UI_SETTINGS_PREFERENCES_NAME = "soundman_systemui_settings"
+
+/** 应用内可持久化的视觉与面板偏好。 */
+data class AppSettings(
+    val smoothCornersEnabled: Boolean = AppSettingsDefaults.SMOOTH_CORNERS_ENABLED,
+    val volumePercentEnabled: Boolean = AppSettingsDefaults.VOLUME_PERCENT_ENABLED,
+    val systemUiBuiltinVolumePanelEnabled: Boolean = AppSettingsDefaults.SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED,
+)
+
+/** 设置默认值，供存储实现与纯 JVM 测试共享。 */
+object AppSettingsDefaults {
+    const val SMOOTH_CORNERS_ENABLED = false
+    const val VOLUME_PERCENT_ENABLED = false
+    const val SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED = false
+}
+
+/** SharedPreferences 键名的唯一来源，避免读写两端发生漂移。 */
+object AppSettingsKeys {
+    const val SMOOTH_CORNERS = "smooth_corners_enabled"
+    const val VOLUME_PERCENT = "volume_percent_enabled"
+    const val SYSTEM_UI_BUILTIN_VOLUME_PANEL = "system_ui_builtin_volume_panel_enabled"
+
+    val all: Set<String> = setOf(SMOOTH_CORNERS, VOLUME_PERCENT, SYSTEM_UI_BUILTIN_VOLUME_PANEL)
+}
+
+/**
+ * 应用设置读写契约。
+ *
+ * 动机：主页和悬浮窗使用同一组明确的设置语义，同时隔离 Android 存储细节。
+ */
+interface AppSettingsStore {
+    /** 读取完整设置快照；存储异常会直接抛出。 */
+    fun read(): AppSettings
+
+    /** 持久化平滑圆角开关，并返回最新快照。 */
+    fun setSmoothCornersEnabled(enabled: Boolean): AppSettings
+
+    /** 持久化音量百分比开关，并返回最新快照。 */
+    fun setVolumePercentEnabled(enabled: Boolean): AppSettings
+
+    /** 持久化实验性 SystemUI 内置面板开关，并返回最新快照。 */
+    fun setSystemUiBuiltinVolumePanelEnabled(enabled: Boolean): AppSettings
+}
+
+/**
+ * 将 SystemUI 需要的极少量开关写入 YukiHook 跨进程偏好文件。
+ *
+ * 普通 SharedPreferences 保持应用内设置真值；独立镜像只供被注入的 SystemUI 读取，
+ * 避免要求 SystemUI 直接访问模块私有数据目录。
+ */
+object SystemUiAppSettingsSync {
+    fun persistBuiltinPanelEnabled(context: Context, enabled: Boolean) {
+        val crossProcessPreferences = context.prefs(SYSTEM_UI_SETTINGS_PREFERENCES_NAME)
+        crossProcessPreferences.edit {
+            putBoolean(AppSettingsKeys.SYSTEM_UI_BUILTIN_VOLUME_PANEL, enabled)
+        }
+        AppLog.info(
+            "Persisted SystemUI builtin panel setting enabled=$enabled " +
+                    "available=${crossProcessPreferences.isPreferencesAvailable}",
+        )
+    }
+}
+
+/** 使用应用独立 SharedPreferences 文件保存设置。 */
+class SharedPreferencesAppSettingsStore(
+    private val preferences: SharedPreferences,
+    private val systemUiBuiltinPanelMirror: ((Boolean) -> Unit)? = null,
+) : AppSettingsStore {
+    override fun read(): AppSettings = logged("read app settings") {
+        AppSettings(
+            smoothCornersEnabled = preferences.getBoolean(
+                AppSettingsKeys.SMOOTH_CORNERS,
+                AppSettingsDefaults.SMOOTH_CORNERS_ENABLED,
+            ),
+            volumePercentEnabled = preferences.getBoolean(
+                AppSettingsKeys.VOLUME_PERCENT,
+                AppSettingsDefaults.VOLUME_PERCENT_ENABLED,
+            ),
+            systemUiBuiltinVolumePanelEnabled = preferences.getBoolean(
+                AppSettingsKeys.SYSTEM_UI_BUILTIN_VOLUME_PANEL,
+                AppSettingsDefaults.SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED,
+            ),
+        )
+    }
+
+    override fun setSmoothCornersEnabled(enabled: Boolean): AppSettings =
+        write(AppSettingsKeys.SMOOTH_CORNERS, enabled)
+
+    override fun setVolumePercentEnabled(enabled: Boolean): AppSettings =
+        write(AppSettingsKeys.VOLUME_PERCENT, enabled)
+
+    override fun setSystemUiBuiltinVolumePanelEnabled(enabled: Boolean): AppSettings {
+        val previous = read().systemUiBuiltinVolumePanelEnabled
+        val updated = write(AppSettingsKeys.SYSTEM_UI_BUILTIN_VOLUME_PANEL, enabled)
+        try {
+            systemUiBuiltinPanelMirror?.invoke(enabled)
+        } catch (error: RuntimeException) {
+            try {
+                write(AppSettingsKeys.SYSTEM_UI_BUILTIN_VOLUME_PANEL, previous)
+            } catch (rollbackError: RuntimeException) {
+                error.addSuppressed(rollbackError)
+            }
+            AppLog.error("Unable to mirror SystemUI builtin panel setting", error)
+            throw error
+        }
+        return updated
+    }
+
+    private fun write(key: String, enabled: Boolean): AppSettings =
+        logged("write app setting key=$key") {
+            check(preferences.edit().putBoolean(key, enabled).commit()) {
+                "SharedPreferences commit failed for key=$key"
+            }
+            read()
+        }
+
+    private inline fun <T> logged(operation: String, block: () -> T): T = try {
+        block()
+    } catch (error: RuntimeException) {
+        AppLog.error("Unable to $operation", error)
+        throw error
+    }
+}

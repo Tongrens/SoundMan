@@ -159,6 +159,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.miuix.ui)
     implementation(libs.miuix.icons)
+    implementation(libs.miuix.squircle)
     implementation(libs.yukihookapi.api)
     compileOnly(libs.xposed.api)
     ksp(libs.yukihookapi.ksp.xposed)

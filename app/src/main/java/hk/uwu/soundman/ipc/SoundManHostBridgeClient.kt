@@ -85,18 +85,24 @@ class SoundManHostBridgeClient(
             latch.await(timeoutMs, TimeUnit.MILLISECONDS)
         } catch (error: InterruptedException) {
             Thread.currentThread().interrupt()
-            AppLog.error("Interrupted while waiting for SoundMan host Binder", error)
+            val closing = synchronized(lock) { closed }
+            if (!closing) {
+                AppLog.error("Interrupted while waiting for SoundMan host Binder", error)
+            }
             false
         }
-        val connected = synchronized(lock) {
+        val outcome = synchronized(lock) {
             if (connectLatch === latch) connectLatch = null
-            signalled && session?.isConnected() == true
+            SoundManConnectOutcome(
+                connected = signalled && session?.isConnected() == true,
+                closed = closed,
+            )
         }
-        if (!connected) {
+        if (SoundManConnectOutcomePolicy.shouldReportFailure(outcome)) {
             AppLog.error("SoundMan host connection attempt failed signalled=$signalled")
             unavailableListener(REASON_CONNECT_FAILED)
         }
-        return connected
+        return outcome.connected
     }
 
     fun isConnected(): Boolean = session?.isConnected() == true
@@ -153,17 +159,25 @@ class SoundManHostBridgeClient(
     }
 
     private fun enqueueInstall(hostBinder: IBinder, protocolVersion: Int) {
-        val accepted = handshakeHandler.post {
-            try {
-                installSession(hostBinder, protocolVersion)
-            } catch (error: Throwable) {
-                AppLog.error("Unable to install SoundMan host session", error)
-                failConnect()
+        val accepted = synchronized(lock) {
+            if (closed) return
+            handshakeHandler.post {
+                if (synchronized(lock) { closed }) return@post
+                try {
+                    installSession(hostBinder, protocolVersion)
+                } catch (error: Throwable) {
+                    if (synchronized(lock) { closed }) return@post
+                    AppLog.error("Unable to install SoundMan host session", error)
+                    failConnect()
+                }
             }
         }
         if (!accepted) {
-            AppLog.error("handshakeHandler rejected host offer dispatch")
-            failConnect()
+            val closing = synchronized(lock) { closed }
+            if (!closing) {
+                AppLog.error("handshakeHandler rejected host offer dispatch")
+                failConnect()
+            }
         }
     }
 
@@ -229,4 +243,15 @@ class SoundManHostBridgeClient(
         const val REASON_PROTOCOL_ERROR = "protocol_error"
         const val REASON_CONNECT_FAILED = "connect_failed"
     }
+}
+
+internal data class SoundManConnectOutcome(
+    val connected: Boolean,
+    val closed: Boolean,
+)
+
+/** 决定连接等待结束后是否应向业务层报告真实连接故障。 */
+internal object SoundManConnectOutcomePolicy {
+    fun shouldReportFailure(outcome: SoundManConnectOutcome): Boolean =
+        !outcome.connected && !outcome.closed
 }

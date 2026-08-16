@@ -6,6 +6,15 @@
     <string name="home_status_channel">Channel</string>
     <string name="home_git_branch">Branch</string>
     <string name="home_open_overlay">Open volume panel</string>
+    <string name="home_settings">Settings</string>
+    <string name="settings_title">Settings</string>
+    <string name="settings_back">Back</string>
+    <string name="settings_smooth_corners">Smooth corners</string>
+    <string name="settings_smooth_corners_summary">Use MIUIX squircle corners for primary glass surfaces and panels</string>
+    <string name="settings_volume_percent">Show volume percentage</string>
+    <string name="settings_volume_percent_summary">Show the current percentage above each app volume bar</string>
+    <string name="settings_systemui_builtin_volume_panel">Experimental built-in System UI panel</string>
+    <string name="settings_systemui_builtin_volume_panel_summary">Show app volume controls inside the current system volume dialog; failures fall back to the overlay</string>
     <string name="home_github" translatable="false">GitHub</string>
     <string name="home_xposed_active">Module activated</string>
     <string name="home_xposed_inactive">Module not activated</string>

@@ -77,12 +77,19 @@ class AppVolumeBarHitTest {
     }
 
     @Test
-    fun edgePullIsZeroInsideRangeAndGrowsOutside() {
-        assertEquals(0f, AppVolumeBarHit.edgePull(0f), 0.0001f)
-        assertEquals(0f, AppVolumeBarHit.edgePull(100f), 0.0001f)
-        assertTrue(AppVolumeBarHit.edgePull(110f) > 0f)
-        assertTrue(AppVolumeBarHit.edgePull(-8f) > 0f)
-        assertEquals(AppVolumeBarHit.EDGE_PULL_MAX, AppVolumeBarHit.edgePull(10_000f), 0.0001f)
+    fun overflowFeedbackStaysInsideShortSignedDistance() {
+        assertEquals(0f, AppVolumeBarHit.internalOverflowOffsetDp(0f), 0.0001f)
+        assertEquals(0f, AppVolumeBarHit.internalOverflowOffsetDp(100f), 0.0001f)
+        assertTrue(AppVolumeBarHit.internalOverflowOffsetDp(110f) > 0f)
+        assertTrue(AppVolumeBarHit.internalOverflowOffsetDp(-8f) < 0f)
+        assertTrue(
+            AppVolumeBarHit.internalOverflowOffsetDp(10_000f) <=
+                    AppVolumeBarHit.INTERNAL_OVERFLOW_MAX_DP,
+        )
+        assertTrue(
+            AppVolumeBarHit.internalOverflowOffsetDp(-10_000f) >=
+                    -AppVolumeBarHit.INTERNAL_OVERFLOW_MAX_DP,
+        )
     }
 
     @Test
@@ -127,6 +134,33 @@ class AppVolumeBarHitTest {
     }
 
     @Test
+    fun progressKeepsFixedSmallRightRadiusAtZeroMiddleAndFull() {
+        val zero = AppVolumeBarHit.fillGeometry(0f)
+        val middle = AppVolumeBarHit.fillGeometry(0.5f)
+        val full = AppVolumeBarHit.fillGeometry(1f)
+
+        assertFalse(zero.visible)
+        assertTrue(middle.visible)
+        assertTrue(full.visible)
+        assertEquals(AppVolumeBarHit.FILL_END_RADIUS_DP, zero.rightRadiusDp, 0f)
+        assertEquals(AppVolumeBarHit.FILL_END_RADIUS_DP, middle.rightRadiusDp, 0f)
+        assertEquals(AppVolumeBarHit.FILL_END_RADIUS_DP, full.rightRadiusDp, 0f)
+        assertTrue(full.rightRadiusDp < full.leftRadiusDp)
+        assertEquals(60f, AppVolumeBarHit.SHELL_HEIGHT_DP, 0f)
+    }
+
+    @Test
+    fun borderIsAlwaysTheLastVolumeBarLayer() {
+        assertEquals(VolumeBarLayer.Track, VolumeBarLayerOrder.first())
+        assertTrue(
+            VolumeBarLayerOrder.indexOf(VolumeBarLayer.Progress) < VolumeBarLayerOrder.indexOf(
+                VolumeBarLayer.Icons
+            )
+        )
+        assertEquals(VolumeBarLayer.Border, VolumeBarLayerOrder.last())
+    }
+
+    @Test
     fun rejectsNonPositiveWidth() {
         assertThrows(IllegalArgumentException::class.java) {
             AppVolumeBarHit.isMoreHit(0f, 0f)
@@ -159,7 +193,10 @@ class AppVolumeBarHitTest {
             AppVolumeBarHit.rubberBandOverflow(-1f, 100f, 0.55f)
         }
         assertThrows(IllegalArgumentException::class.java) {
-            AppVolumeBarHit.edgePull(Float.NaN)
+            AppVolumeBarHit.internalOverflowOffsetDp(Float.NaN)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            AppVolumeBarHit.fillGeometry(1.01f)
         }
     }
 }

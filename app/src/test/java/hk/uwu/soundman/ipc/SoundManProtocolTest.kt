@@ -143,6 +143,28 @@ class SoundManProtocolTest {
         assertTrue(error.message.orEmpty().contains("length"))
     }
 
+    @Test
+    fun panelDeviceAndTargetIdentitiesUseTheSharedProtocolShape() {
+        val device = AudioOutputDevice(
+            type = OutputDeviceType.USB,
+            candidates = listOf(AudioDeviceIdentity(0x4000, "card=2;device=0")),
+            productName = "USB DAC",
+        )
+
+        assertEquals(
+            "USB:USB DAC:16384@card=2;device=0",
+            SoundManProtocol.encodeDeviceIdentity(device),
+        )
+        assertEquals(
+            SoundManProtocol.encodeDeviceIdentity(device),
+            SoundManProtocol.encodeTargetIdentity(device.target),
+        )
+        assertEquals(
+            "follow-system",
+            SoundManProtocol.encodeTargetIdentity(OutputTarget.FollowSystem)
+        )
+    }
+
     companion object {
         private const val SPEAKER_INTERNAL_TYPE = 0x2
         private const val EARPIECE_INTERNAL_TYPE = 0x1

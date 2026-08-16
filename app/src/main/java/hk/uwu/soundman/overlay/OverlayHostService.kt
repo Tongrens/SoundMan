@@ -156,6 +156,7 @@ class OverlayHostService : Service() {
     private fun removePanel() {
         val view = panelView
         if (view != null) {
+            applyWindowReveal(0f)
             try {
                 windowManager.removeView(view)
             } catch (error: IllegalArgumentException) {

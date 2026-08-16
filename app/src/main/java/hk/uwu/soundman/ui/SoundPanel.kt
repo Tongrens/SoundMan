@@ -16,7 +16,6 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -67,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import hk.uwu.soundman.R
+import hk.uwu.soundman.data.APP_SETTINGS_PREFERENCES_NAME
 import hk.uwu.soundman.data.ActiveMediaAppsState
 import hk.uwu.soundman.data.AudioDeviceScan
 import hk.uwu.soundman.data.AudioDevicesSource
@@ -76,6 +76,7 @@ import hk.uwu.soundman.data.InstalledAppsAccess
 import hk.uwu.soundman.data.PermissionCatalog
 import hk.uwu.soundman.data.RULE_PREFERENCES_NAME
 import hk.uwu.soundman.data.RuleStore
+import hk.uwu.soundman.data.SharedPreferencesAppSettingsStore
 import hk.uwu.soundman.data.SharedPreferencesRuleStore
 import hk.uwu.soundman.ipc.PreferredDeviceSync
 import hk.uwu.soundman.log.AppLog
@@ -116,6 +117,15 @@ fun SoundPanel(
     val ruleStore = remember(applicationContext) {
         SharedPreferencesRuleStore(applicationContext.getSharedPreferences(RULE_PREFERENCES_NAME, Context.MODE_PRIVATE))
     }
+    val appSettingsStore = remember(applicationContext) {
+        SharedPreferencesAppSettingsStore(
+            applicationContext.getSharedPreferences(
+                APP_SETTINGS_PREFERENCES_NAME,
+                Context.MODE_PRIVATE
+            ),
+        )
+    }
+    val appSettings = remember(appSettingsStore) { appSettingsStore.read() }
     val hostSource = remember(applicationContext, hasInstalledAppsAccess) {
         HostPlaybackSource(applicationContext, ruleStore, installedAppsAccess)
     }
@@ -189,7 +199,11 @@ fun SoundPanel(
         !hasInstalledAppsAccess
 
     MiuixTheme {
-        Box(Modifier.fillMaxSize()) {
+        BlurMaterialHost(
+            smoothCornersEnabled = appSettings.smoothCornersEnabled,
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            Box(Modifier.fillMaxSize()) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -233,9 +247,12 @@ fun SoundPanel(
                     .widthIn(min = 320.dp, max = 430.dp)
                     .padding(horizontal = 24.dp)
                     .then(panelMotion)
-                    .clip(OverlayGlassShape)
-                    .background(OverlayGlassFill)
-                    .border(1.dp, OverlayGlassBorder, OverlayGlassShape)
+                    .blurMaterial(
+                        purpose = BlurMaterialPurpose.Panel,
+                        cornerRadius = OverlayGlassRadius,
+                        tint = OverlayGlassFill,
+                        border = OverlayGlassBorder,
+                    )
                     .clickable(
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() },
@@ -293,6 +310,7 @@ fun SoundPanel(
                                     apps = currentApps,
                                     rules = rules,
                                     readDefault = ruleStore::readOrDefault,
+                                    showVolumePercent = appSettings.volumePercentEnabled,
                                     onSelectOutput = { selectedPackage = it.packageName },
                                     onVolumeChanged = { app, percent ->
                                         rules[app.packageName] = ruleStore.updateVolume(app.packageName, app.uid, percent)
@@ -305,6 +323,7 @@ fun SoundPanel(
                     }
                 }
             }
+        }
         }
     }
 }
@@ -403,8 +422,11 @@ private fun InstalledAppsPermissionHint(onClick: () -> Unit) {
         stringResource(R.string.panel_installed_apps_permission_hint),
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color(0x24B26A00))
+            .blurMaterial(
+                purpose = BlurMaterialPurpose.Hint,
+                cornerRadius = 16.dp,
+                tint = Color(0x24B26A00)
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         color = Color(0xFF8A4B00),
@@ -417,6 +439,7 @@ private fun AppVolumeList(
     apps: List<AdjustableApp>,
     rules: Map<String, AppAudioRule>,
     readDefault: (String, Int) -> AppAudioRule,
+    showVolumePercent: Boolean,
     onVolumeChanged: (AdjustableApp, Int) -> Unit,
     onSelectOutput: (AdjustableApp) -> Unit,
 ) {
@@ -438,6 +461,7 @@ private fun AppVolumeList(
                 AppVolumeItem(
                     app = app,
                     rule = ruleResult.getOrThrow(),
+                    showVolumePercent = showVolumePercent,
                     onVolumeChanged = { onVolumeChanged(app, it) },
                     onSelectOutput = { onSelectOutput(app) },
                     modifier = itemModifier,
@@ -452,8 +476,11 @@ private fun CorruptedRuleRow(app: AdjustableApp, modifier: Modifier = Modifier) 
     Row(
         modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(Color(0x18B3261E))
+            .blurMaterial(
+                purpose = BlurMaterialPurpose.Hint,
+                cornerRadius = 20.dp,
+                tint = Color(0x18B3261E)
+            )
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -471,21 +498,38 @@ private fun CorruptedRuleRow(app: AdjustableApp, modifier: Modifier = Modifier) 
 private fun AppVolumeItem(
     app: AdjustableApp,
     rule: AppAudioRule,
+    showVolumePercent: Boolean,
     onVolumeChanged: (Int) -> Unit,
     onSelectOutput: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var draftVolume by remember(app.packageName, rule.revision) { mutableStateOf(rule.volumePercent) }
     Column(modifier.fillMaxWidth()) {
-        Text(
-            app.label,
-            color = OnBlurText,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(start = 4.dp, bottom = 8.dp),
-        )
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp, end = 4.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                app.label,
+                color = OnBlurText,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (showVolumePercent) {
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    stringResource(R.string.panel_volume_percent, draftVolume),
+                    color = OnBlurMuted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
         AppVolumeBar(
             volumePercent = draftVolume,
             appIcon = app.icon,
@@ -602,8 +646,11 @@ private fun DeviceRow(
     Box(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .background(container)
+            .blurMaterial(
+                purpose = if (selected) BlurMaterialPurpose.DeviceSelected else BlurMaterialPurpose.DeviceRow,
+                cornerRadius = 22.dp,
+                tint = container,
+            )
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 20.dp),
     ) {
@@ -687,8 +734,11 @@ private fun PreferencesUnavailable(message: String) {
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .background(Color(0xB8FFFFFF))
+            .blurMaterial(
+                purpose = BlurMaterialPurpose.Hint,
+                cornerRadius = 20.dp,
+                tint = Color(0xB8FFFFFF)
+            )
             .padding(16.dp),
     ) {
         Text(stringResource(R.string.rule_storage_unavailable_title), fontWeight = FontWeight.Bold, color = Color(0xFFB3261E))

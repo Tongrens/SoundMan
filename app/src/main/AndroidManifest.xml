@@ -70,6 +70,12 @@
             android:taskAffinity=""
             android:theme="@style/Theme.SoundMan.Overlay" />
 
+        <provider
+            android:name=".data.RuleStoreBridgeProvider"
+            android:authorities="hk.uwu.soundman.rule-store"
+            android:exported="true"
+            tools:ignore="ExportedContentProvider" />
+
         <service
             android:name=".overlay.OverlayHostService"
             android:exported="false"
