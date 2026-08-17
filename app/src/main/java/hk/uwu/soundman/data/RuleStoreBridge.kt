@@ -10,6 +10,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Looper
 import androidx.core.graphics.drawable.toBitmap
+import androidx.core.net.toUri
+import hk.uwu.soundman.ipc.PreferredDeviceSync
 import hk.uwu.soundman.ipc.SoundManProtocol
 import hk.uwu.soundman.log.AppLog
 import hk.uwu.soundman.model.AppAudioRule
@@ -51,6 +53,34 @@ data class PanelPlaybackRow(
         revision = 0L,
         followsSystemAfterDisconnect = followsSystemAfterDisconnect,
     )
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+
+        other as PanelPlaybackRow
+
+        if (uid != other.uid) return false
+        if (volumePercent != other.volumePercent) return false
+        if (followsSystemAfterDisconnect != other.followsSystemAfterDisconnect) return false
+        if (packageName != other.packageName) return false
+        if (outputTarget != other.outputTarget) return false
+        if (label != other.label) return false
+        if (!iconPng.contentEquals(other.iconPng)) return false
+
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = uid
+        result = 31 * result + volumePercent
+        result = 31 * result + followsSystemAfterDisconnect.hashCode()
+        result = 31 * result + packageName.hashCode()
+        result = 31 * result + outputTarget.hashCode()
+        result = 31 * result + (label?.hashCode() ?: 0)
+        result = 31 * result + (iconPng?.contentHashCode() ?: 0)
+        return result
+    }
 }
 
 data class PanelPlaybackSnapshot(
@@ -83,7 +113,7 @@ object RuleStoreBridgeContract {
     const val KEY_VOLUME_PERCENT = "volumePercent"
     const val KEY_OUTPUT_TARGET = "outputTarget"
     const val KEY_REVISION = "revision"
-    val URI: Uri = Uri.parse("content://$AUTHORITY")
+    val URI: Uri = "content://$AUTHORITY".toUri()
 }
 
 /**
@@ -296,6 +326,9 @@ class RuleStoreBridgeProvider : ContentProvider() {
             check(result.success) { "Panel route failed resultCode=${result.resultCode}" }
             val existing = store.readOrDefault(packageName, uid)
             store.save(packageName, uid, existing.volumePercent, target)
+            // 规则保存后必须广播通知被注入进程同步设备，否则 SystemUI 面板改了设备
+            // 不会实时同步，要等到打开 App 音量管理时才会触发 publishAll。
+            PreferredDeviceSync.publish(context!!, uid, target)
         } finally {
             removeObserver()
         }
@@ -374,11 +407,11 @@ class RuleStoreBridgeProvider : ContentProvider() {
         selection: String?,
         selectionArgs: Array<out String>?,
         sortOrder: String?
-    ): Cursor? =
+    ): Cursor =
         error("RuleStoreBridgeProvider supports call only")
 
     override fun getType(uri: Uri): String? = null
-    override fun insert(uri: Uri, values: ContentValues?): Uri? =
+    override fun insert(uri: Uri, values: ContentValues?): Uri =
         error("RuleStoreBridgeProvider supports call only")
 
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int =
@@ -462,82 +495,6 @@ class ProviderPanelPlayback(private val systemUiContext: Context) {
             ?: error("Panel bridge returned null method=$method")
     } catch (error: RuntimeException) {
         AppLog.error("Unable to call panel bridge method=$method", error)
-        throw error
-    }
-}
-
-/** SystemUI 进程中的 RuleStore 客户端，所有持久化操作均跨进程落到模块 Provider。 */
-class ProviderRuleStore(private val moduleContext: Context) : RuleStore {
-    override fun readAll(): Map<String, AppAudioRule> {
-        val result = call(RuleStoreBridgeContract.METHOD_READ_ALL)
-
-        @Suppress("DEPRECATION")
-        val bundles = result.getParcelableArrayList<Bundle>(RuleStoreBridgeContract.KEY_RULES)
-            ?: error("Rule bridge returned no rules")
-        return SoundManProtocol.decodeRules(bundles).associateBy(AppAudioRule::packageName)
-    }
-
-    override fun readOrDefault(packageName: String, uid: Int): AppAudioRule =
-        decodeRule(call(RuleStoreBridgeContract.METHOD_READ_OR_DEFAULT, identity(packageName, uid)))
-
-    override fun save(
-        packageName: String,
-        uid: Int,
-        volumePercent: Int,
-        outputTarget: OutputTarget
-    ): AppAudioRule =
-        decodeRule(call(RuleStoreBridgeContract.METHOD_SAVE, identity(packageName, uid).apply {
-            putInt(RuleStoreBridgeContract.KEY_VOLUME_PERCENT, volumePercent)
-            putBundle(
-                RuleStoreBridgeContract.KEY_OUTPUT_TARGET,
-                SoundManProtocol.encodeTarget(outputTarget)
-            )
-        }))
-
-    override fun updateVolume(packageName: String, uid: Int, volumePercent: Int): AppAudioRule =
-        decodeRule(
-            call(
-                RuleStoreBridgeContract.METHOD_UPDATE_VOLUME,
-                identity(packageName, uid).apply {
-                    putInt(RuleStoreBridgeContract.KEY_VOLUME_PERCENT, volumePercent)
-                })
-        )
-
-    override fun fallbackToSystem(
-        packageName: String,
-        uid: Int,
-        disconnectedTarget: OutputTarget.Device
-    ): AppAudioRule =
-        decodeRule(
-            call(
-                RuleStoreBridgeContract.METHOD_FALLBACK_TO_SYSTEM,
-                identity(packageName, uid).apply {
-                    putBundle(
-                        RuleStoreBridgeContract.KEY_OUTPUT_TARGET,
-                        SoundManProtocol.encodeTarget(disconnectedTarget)
-                    )
-                })
-        )
-
-    override fun revision(): Long = call(RuleStoreBridgeContract.METHOD_REVISION)
-        .getLong(RuleStoreBridgeContract.KEY_REVISION)
-
-    private fun identity(packageName: String, uid: Int): Bundle = Bundle().apply {
-        require(packageName.isNotBlank()) { "packageName must not be blank" }
-        require(uid >= 0) { "uid must be non-negative" }
-        putString(RuleStoreBridgeContract.KEY_PACKAGE_NAME, packageName)
-        putInt(RuleStoreBridgeContract.KEY_UID, uid)
-    }
-
-    private fun decodeRule(bundle: Bundle): AppAudioRule = SoundManProtocol.decodeRule(
-        bundle.getBundle(RuleStoreBridgeContract.KEY_RULE) ?: error("Rule bridge returned no rule"),
-    )
-
-    private fun call(method: String, extras: Bundle? = null): Bundle = try {
-        moduleContext.contentResolver.call(RuleStoreBridgeContract.URI, method, null, extras)
-            ?: error("Rule bridge returned null method=$method")
-    } catch (error: RuntimeException) {
-        AppLog.error("Unable to call rule bridge method=$method", error)
         throw error
     }
 }
