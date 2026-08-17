@@ -78,6 +78,142 @@ class SystemUiBuiltinPanelPolicyTest {
     }
 
     @Test
+    fun officialColumnHeightIsNotInflatedByAFormerMinimumCardHeight() {
+        assertEquals(
+            196,
+            SystemUiIndependentPanelPolicy.officialColumnHeight(
+                measuredHeight = 196,
+                maximumHeight = 700,
+            ),
+        )
+    }
+
+    @Test
+    fun expandedPanelKeepsOfficialColumnHeightAndUsesEqualInsetsAndSpacing() {
+        val officialColumnHeight = 320
+        val insets = SystemUiIndependentPanelPolicy.symmetricColumnInsets(16)
+        val layout = SystemUiIndependentPanelPolicy.compactLayout(
+            appCount = 3,
+            availableWidth = 500,
+            availableHeight = 800,
+            columnWidth = 96,
+            columnHeight = officialColumnHeight,
+            navigationWidth = 0,
+            horizontalPadding = insets.horizontal,
+            verticalPadding = insets.vertical,
+            columnSpacing = insets.horizontal,
+            headerHeight = 0,
+            edgeMargin = 12,
+            emptyContentWidth = 180,
+        )
+
+        assertEquals(insets.horizontal, insets.vertical)
+        assertEquals(352, layout.width)
+        assertEquals(352, layout.height)
+    }
+
+    @Test
+    fun appColumnTransitionSeparatesRetainedEnteringAndExitingPackages() {
+        val transition = SystemUiAppColumnTransitions.resolve(
+            previous = setOf("music", "podcast"),
+            next = setOf("podcast", "video"),
+        )
+
+        assertEquals(setOf("podcast"), transition.retained)
+        assertEquals(setOf("video"), transition.entering)
+        assertEquals(setOf("music"), transition.exiting)
+    }
+
+    @Test
+    fun officialDismissRequiresDialogToRemainShownWhileControllerIsShowing() {
+        assertTrue(
+            SystemUiOfficialDismissGate.accepts(
+                controllerShowing = true,
+                needsDialog = true,
+                dialogShown = true,
+            ),
+        )
+        assertFalse(
+            SystemUiOfficialDismissGate.accepts(
+                controllerShowing = true,
+                needsDialog = true,
+                dialogShown = false,
+            ),
+        )
+        assertTrue(
+            SystemUiOfficialDismissGate.accepts(
+                controllerShowing = false,
+                needsDialog = true,
+                dialogShown = false,
+            ),
+        )
+    }
+
+    @Test
+    fun officialDismissSessionActionAnimatesTimeoutAndImmediatelyCleansScreenOff() {
+        assertEquals(
+            SystemUiOfficialDismissSessionAction.CLOSE_FROM_OFFICIAL_ANIMATED,
+            SystemUiOfficialDismissSessionPolicy.action(
+                reason = SystemUiOfficialDismissReasons.TIMEOUT,
+                sessionClosing = false,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialDismissSessionAction.CLOSE_FROM_OFFICIAL_IMMEDIATELY,
+            SystemUiOfficialDismissSessionPolicy.action(
+                reason = SystemUiOfficialDismissReasons.SCREEN_OFF,
+                sessionClosing = false,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialDismissSessionAction.IGNORE_ALREADY_CLOSING,
+            SystemUiOfficialDismissSessionPolicy.action(
+                reason = SystemUiOfficialDismissReasons.TIMEOUT,
+                sessionClosing = true,
+            ),
+        )
+    }
+
+    @Test
+    fun externalDismissKeepsShadowInvisibleUntilOfficialParentIsHidden() {
+        assertEquals(
+            SystemUiOfficialShadowAction.KEEP_INVISIBLE,
+            SystemUiOfficialShadowPolicy.action(
+                externalDismiss = true,
+                dialogParentVisible = true,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialShadowAction.RESTORE,
+            SystemUiOfficialShadowPolicy.action(
+                externalDismiss = true,
+                dialogParentVisible = false,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialShadowAction.RESTORE,
+            SystemUiOfficialShadowPolicy.action(
+                externalDismiss = false,
+                dialogParentVisible = true,
+            ),
+        )
+    }
+
+    @Test
+    fun externalDismissRestoresDialogOnlyAfterOfficialParentIsHidden() {
+        assertTrue(
+            SystemUiExternalDismissCompletionPolicy.restoreOriginalDialogState(
+                SystemUiOfficialDismissCompletionAction.COMPLETE,
+            ),
+        )
+        assertFalse(
+            SystemUiExternalDismissCompletionPolicy.restoreOriginalDialogState(
+                SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE,
+            ),
+        )
+    }
+
+    @Test
     fun independentPanelMorphAnchorsExpandedRectAtNearestHorizontalEdge() {
         val right = SystemUiIndependentPanelPolicy.animationSpec(
             folded = SystemUiPanelRect(840, 40, 960, 340),
@@ -398,9 +534,9 @@ class SystemUiBuiltinPanelPolicyTest {
     }
 
     @Test
-    fun sliderMovesStayLocalAndStopCommitsFinalValue() {
+    fun sliderMovesCommitLiveAndStopCommitsFinalValue() {
         assertEquals(
-            SystemUiSliderCommitAction.LOCAL_FRAME_ONLY,
+            SystemUiSliderCommitAction.COMMIT_LIVE,
             SystemUiIndependentPanelPolicy.sliderCommitAction(
                 tracking = true,
                 stopTracking = false
@@ -527,6 +663,34 @@ class SystemUiBuiltinPanelPolicyTest {
     }
 
     @Test
+    fun externalDismissCompletesWhenDialogWindowIsDetachedEvenIfOldParentRemainsVisible() {
+        assertEquals(
+            SystemUiOfficialDismissCompletionAction.COMPLETE,
+            SystemUiIndependentPanelPolicy.externalOfficialDismissCompletionAction(
+                dialogShown = false,
+                elapsedMillis = 352L,
+                timeoutMillis = 1_000L,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialDismissCompletionAction.WAIT,
+            SystemUiIndependentPanelPolicy.externalOfficialDismissCompletionAction(
+                dialogShown = true,
+                elapsedMillis = 999L,
+                timeoutMillis = 1_000L,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE,
+            SystemUiIndependentPanelPolicy.externalOfficialDismissCompletionAction(
+                dialogShown = true,
+                elapsedMillis = 1_000L,
+                timeoutMillis = 1_000L,
+            ),
+        )
+    }
+
+    @Test
     fun staleCompletionFromPreviousSessionCannotFinalizeNewGeneration() {
         val oldSession = SystemUiOfficialDismissCompletionGate()
         val newSession = SystemUiOfficialDismissCompletionGate()
@@ -568,29 +732,49 @@ class SystemUiBuiltinPanelPolicyTest {
     }
 
     @Test
-    fun sliderDragMovesStayLocalAndStopDispatchesBackendExactlyOnce() {
+    fun sliderDragDispatchesChangedLevelsLiveAndDoesNotRepeatFinalLevel() {
         val session = SystemUiSliderDragSession()
-        var backendDispatches = 0
-        var committedProgress = -1
+        val backendLevels = mutableListOf<Int>()
 
-        session.start()
-        repeat(12) {
-            assertEquals(SystemUiSliderCommitAction.LOCAL_FRAME_ONLY, session.move())
-            assertEquals(0, backendDispatches)
-        }
+        session.start(initialLevel = 42)
         assertEquals(
-            SystemUiSliderCommitAction.COMMIT_FINAL,
-            session.stop(730) { progress ->
-                backendDispatches += 1
-                committedProgress = progress
-            },
+            SystemUiSliderCommitAction.NONE,
+            session.move(42) { level -> backendLevels += level },
+        )
+        assertEquals(
+            SystemUiSliderCommitAction.COMMIT_LIVE,
+            session.move(43) { level -> backendLevels += level },
         )
         assertEquals(
             SystemUiSliderCommitAction.NONE,
-            session.stop(900) { backendDispatches += 1 },
+            session.move(43) { level -> backendLevels += level },
         )
-        assertEquals(1, backendDispatches)
-        assertEquals(730, committedProgress)
+        assertEquals(
+            SystemUiSliderCommitAction.COMMIT_LIVE,
+            session.move(67) { level -> backendLevels += level },
+        )
+        assertEquals(
+            SystemUiSliderCommitAction.NONE,
+            session.stop(67) { level -> backendLevels += level },
+        )
+        assertEquals(
+            SystemUiSliderCommitAction.NONE,
+            session.stop(90) { level -> backendLevels += level },
+        )
+        assertEquals(listOf(43, 67), backendLevels)
+    }
+
+    @Test
+    fun sliderDragStopCommitsFinalLevelWhenLastMoveWasNotDelivered() {
+        val session = SystemUiSliderDragSession()
+        val backendLevels = mutableListOf<Int>()
+
+        session.start(initialLevel = 30)
+        assertEquals(
+            SystemUiSliderCommitAction.COMMIT_FINAL,
+            session.stop(31) { level -> backendLevels += level },
+        )
+        assertEquals(listOf(31), backendLevels)
     }
 
     @Test

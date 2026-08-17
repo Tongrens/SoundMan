@@ -3,6 +3,7 @@ package hk.uwu.soundman.hook.scopes.systemui.runtime
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
@@ -13,7 +14,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
@@ -34,6 +34,11 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
+import androidx.core.graphics.createBitmap
+import androidx.core.graphics.drawable.toDrawable
+import com.highcapable.kavaref.extension.classOf
+import com.highcapable.kavaref.extension.makeAccessible
+import com.highcapable.kavaref.extension.toClass
 import hk.uwu.soundman.R
 import hk.uwu.soundman.data.AudioDeviceScan
 import hk.uwu.soundman.data.PanelPlaybackRow
@@ -61,6 +66,7 @@ import java.util.concurrent.atomic.AtomicLong
 class SystemUiBuiltinVolumePanel(
     private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
     private val hookDismiss: () -> Boolean,
+    private val rescheduleOfficialTimeout: () -> Boolean,
 ) {
     fun closeFor(sourceView: View) {
         try {
@@ -68,6 +74,28 @@ class SystemUiBuiltinVolumePanel(
             synchronized(sessions) { sessions[dialog] }?.close("entry cleanup")
         } catch (throwable: Throwable) {
             log(Log.ERROR, TAG, "Independent panel close boundary failed", throwable)
+        }
+    }
+
+    /**
+     * 官方 VolumePanelViewController 已经进入 dismissH 时调用。
+     *
+     * 锁屏、系统窗口状态变化等场景不会经过 SoundMan 的关闭按钮，因此必须清理自建 host；
+     * session 使用无官方回调的终止路径，绝不能从这里再次调用 dismissH。
+     */
+    fun closeForOfficialDismiss(reason: Int) {
+        val activeSessions = synchronized(sessions) { sessions.values.toSet() }
+        activeSessions.forEach { session ->
+            try {
+                session.closeForOfficialDismiss(reason)
+            } catch (throwable: Throwable) {
+                log(
+                    Log.ERROR,
+                    TAG,
+                    "Independent panel official-dismiss cleanup failed reason=$reason",
+                    throwable,
+                )
+            }
         }
     }
 
@@ -97,6 +125,7 @@ class SystemUiBuiltinVolumePanel(
                 openOverlay = openOverlay,
                 log = log,
                 hookDismiss = hookDismiss,
+                rescheduleOfficialTimeout = rescheduleOfficialTimeout,
                 onClosed = { closedSession ->
                     synchronized(sessions) {
                         if (sessions[dialog] === closedSession) sessions.remove(dialog)
@@ -143,6 +172,7 @@ class SystemUiBuiltinVolumePanel(
         private val openOverlay: () -> Unit,
         private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
         private val hookDismiss: () -> Boolean,
+        private val rescheduleOfficialTimeout: () -> Boolean,
         private val onClosed: (Session) -> Unit,
     ) {
         private val closed = AtomicBoolean(false)
@@ -164,8 +194,12 @@ class SystemUiBuiltinVolumePanel(
         private val originalImportantForAccessibility = dialog.importantForAccessibility
         private val officialColumns = ArrayList<OfficialVolumeColumn>()
         private val trackingUids = HashSet<Int>()
+        private val volumeSubmissionLock = Any()
+        private val pendingVolumeSubmissions = HashMap<Int, PendingVolumeSubmission>()
+        private val drainingVolumeUids = HashSet<Int>()
         private val appVisualCache = HashMap<String, Pair<String, Drawable>>()
         private val pluginDrawableIdCache = HashMap<String, Int>()
+        private var expandedPanelContentInsetPx: Int? = null
         private lateinit var windowRoot: ViewGroup
         private lateinit var host: FrameLayout
         private lateinit var panel: FrameLayout
@@ -183,11 +217,26 @@ class SystemUiBuiltinVolumePanel(
         private var animationFraction = 0f
         private var openAnimationStarted = false
         private var currentPage: View? = null
+        private var activeAppsPage: AppsPageBuild? = null
+        private var renderedAppPackages = emptySet<String>()
+        private var appsRenderGeneration = 0L
         private var selectedPackage: String? = null
         private var lastSnapshot: PanelPlaybackSnapshot? = null
         private var lastFingerprint: SystemUiPanelSnapshotFingerprint? = null
         private var fallbackColumnWidth = 0
         private var fallbackColumnHeight = 0
+
+        // 官方 miuix.animation.utils.SpringInterpolator 实例，通过 pluginClassLoader 反射创建。
+        // 官方实现内部自动计算 spring 收束时间（solveDuration），getDuration() 返回自然 duration。
+        private var hideSpringInterpolator: android.animation.TimeInterpolator =
+            PathInterpolator(0.2f, 0f, 0f, 1f)
+        private var hideSpringDurationMillis = HIDE_SLIDE_ANIMATION_DURATION_FALLBACK_MILLIS
+        private var columnEnterSpringInterpolator: android.animation.TimeInterpolator =
+            PathInterpolator(0.2f, 0f, 0f, 1f)
+        private var columnEnterSpringDurationMillis = COLUMN_TRANSITION_DURATION_FALLBACK_MILLIS
+        private var columnExitSpringInterpolator: android.animation.TimeInterpolator =
+            PathInterpolator(0.2f, 0f, 0f, 1f)
+        private var columnExitSpringDurationMillis = COLUMN_TRANSITION_DURATION_FALLBACK_MILLIS
 
         fun mount() {
             check(!closed.get()) { "Cannot mount a closed independent panel" }
@@ -196,6 +245,10 @@ class SystemUiBuiltinVolumePanel(
             check(windowRoot.findViewWithTag<View>(HOST_TAG) == null) { "Independent full-window host already exists" }
             pluginClassLoader = dialog.javaClass.classLoader
                 ?: error("MiuiVolumeDialogView has no plugin ClassLoader")
+
+            // 反射创建官方 miuix.animation.utils.SpringInterpolator，复刻官方 Folme spring 物理曲线。
+            // 官方实现内部自动计算 spring 收束时间，无需手写 duration。
+            initSpringInterpolators()
 
             val foldedWidth =
                 dimension(dialog.width, dialog.measuredWidth, dialog.layoutParams?.width)
@@ -256,12 +309,24 @@ class SystemUiBuiltinVolumePanel(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
             )
+            // 官方 dismissH 以 mVolumeView.isShown() 作为状态机前置条件；不能将 dialog 设为
+            // INVISIBLE，否则 timeout/screen-off 会直接 return，mShowing 不会复位、官方窗口也不会关闭。
+            // 用 alpha=0 保持它对状态机可见，自建全窗口 host 覆盖实际视觉和触摸。
             dialog.alpha = 0f
-            dialog.visibility = View.INVISIBLE
+            dialog.visibility = View.VISIBLE
+            check(
+                SystemUiOfficialDismissGate.accepts(
+                    controllerShowing = true,
+                    needsDialog = true,
+                    dialogShown = dialog.isShown,
+                )
+            ) { "Independent panel must keep official dialog shown for dismissH" }
             // 官方 shadow 是 dialog 的独立 sibling；必须在自建面板开始显示前一起隐藏。
             // 否则面板关闭滑出时会先露出仍可见的原版 shadow，形成用户看到的闪帧。
             suppressOfficialShadow()
             dialog.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            // 面板挂载时立即重置官方超时，避免挂载前遗留的短超时导致面板刚展开就被收回。
+            rescheduleOfficialDismissTimeout()
             startPolling()
             log(
                 Log.INFO,
@@ -272,6 +337,7 @@ class SystemUiBuiltinVolumePanel(
             )
         }
 
+        @SuppressLint("ClickableViewAccessibility")
         private fun buildFullWindowHost(): FrameLayout = FrameLayout(targetContext).apply {
             tag = HOST_TAG
             isClickable = true
@@ -289,6 +355,7 @@ class SystemUiBuiltinVolumePanel(
                             event.x.toInt(),
                             event.y.toInt(),
                         ) == SystemUiPanelHit.OUTSIDE
+                        if (!outsideGesture) rescheduleOfficialDismissTimeout()
                         true
                     }
 
@@ -400,6 +467,7 @@ class SystemUiBuiltinVolumePanel(
         }
 
         private fun configureAppsPanel(appCount: Int, columnWidth: Int, columnHeight: Int) {
+            val contentInset = expandedPanelContentInset()
             val layout = SystemUiIndependentPanelPolicy.compactLayout(
                 appCount = appCount,
                 availableWidth = rootWidth(),
@@ -407,9 +475,9 @@ class SystemUiBuiltinVolumePanel(
                 columnWidth = columnWidth,
                 columnHeight = columnHeight,
                 navigationWidth = 0,
-                horizontalPadding = dp(PANEL_HORIZONTAL_PADDING_DP),
-                verticalPadding = dp(PANEL_VERTICAL_PADDING_DP),
-                columnSpacing = dp(COLUMN_SPACING_DP),
+                horizontalPadding = contentInset,
+                verticalPadding = contentInset,
+                columnSpacing = contentInset,
                 headerHeight = 0,
                 edgeMargin = dp(PANEL_EDGE_MARGIN_DP),
                 emptyContentWidth = dp(EMPTY_CONTENT_WIDTH_DP),
@@ -479,6 +547,7 @@ class SystemUiBuiltinVolumePanel(
             columnWidth: Int,
             columnHeight: Int,
         ): SystemUiPanelRect {
+            val contentInset = expandedPanelContentInset()
             val layout = SystemUiIndependentPanelPolicy.compactLayout(
                 appCount = appCount,
                 availableWidth = rootWidth(),
@@ -486,9 +555,9 @@ class SystemUiBuiltinVolumePanel(
                 columnWidth = columnWidth,
                 columnHeight = columnHeight,
                 navigationWidth = 0,
-                horizontalPadding = dp(PANEL_HORIZONTAL_PADDING_DP),
-                verticalPadding = dp(PANEL_VERTICAL_PADDING_DP),
-                columnSpacing = dp(COLUMN_SPACING_DP),
+                horizontalPadding = contentInset,
+                verticalPadding = contentInset,
+                columnSpacing = contentInset,
                 headerHeight = 0,
                 edgeMargin = dp(PANEL_EDGE_MARGIN_DP),
                 emptyContentWidth = dp(EMPTY_CONTENT_WIDTH_DP),
@@ -808,7 +877,7 @@ class SystemUiBuiltinVolumePanel(
 
         private fun rasterizeDrawable(packageName: String, drawable: Drawable): Drawable {
             val size = dp(APP_ICON_RASTER_SIZE_DP)
-            val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+            val bitmap = createBitmap(size, size)
             val canvas = Canvas(bitmap)
             val oldBounds = drawable.bounds
             try {
@@ -820,7 +889,7 @@ class SystemUiBuiltinVolumePanel(
             check(bitmapHasVisiblePixel(bitmap)) {
                 "Drawable rendered fully transparent package=$packageName type=${drawable.javaClass.name}"
             }
-            return BitmapDrawable(targetContext.resources, bitmap).apply {
+            return bitmap.toDrawable(targetContext.resources).apply {
                 setBounds(
                     0,
                     0,
@@ -869,7 +938,7 @@ class SystemUiBuiltinVolumePanel(
                     )
                     null
                 } else {
-                    BitmapDrawable(targetContext.resources, bitmap).apply {
+                    bitmap.toDrawable(targetContext.resources).apply {
                         setBounds(0, 0, bitmap.width, bitmap.height)
                     }
                 }
@@ -891,18 +960,194 @@ class SystemUiBuiltinVolumePanel(
             }
             if (selectedPackage != null && selected == null) selectedPackage = null
             if (selected != null) {
+                // 设备页会释放 overview 的官方列；取消任何尚未执行的列退出回调，避免旧页重建。
+                appsRenderGeneration += 1L
+                activeAppsPage = null
+                renderedAppPackages = emptySet()
                 configureDevicePanel(loaded.snapshot.devices.size)
                 replacePage(
                     buildDevicePage(selected, loaded.snapshot.devices),
                     forward = true,
                     animate = false
                 )
-            } else {
-                val appsPage = buildAppsPage(loaded.apps)
-                configureAppsPanel(loaded.apps.size, appsPage.columnWidth, appsPage.columnHeight)
-                replacePage(appsPage.view, forward = false, animate = false)
+                startOpenAnimation()
+                return
             }
-            startOpenAnimation()
+            renderAppsSnapshot(loaded.apps)
+        }
+
+        private fun renderAppsSnapshot(apps: List<LoadedAppRow>) {
+            val nextPackages = apps.map { it.state.packageName }.toSet()
+            val transition = SystemUiAppColumnTransitions.resolve(renderedAppPackages, nextPackages)
+            val renderGeneration = ++appsRenderGeneration
+            // 在构建新页面前，记录保留列在旧页面中的 X 坐标，
+            // 用于退出动画完成后让保留列平滑滑动到新位置，而非瞬移。
+            val oldColumnXs = HashMap<String, Float>()
+            val oldPage = activeAppsPage?.takeIf { it.view === currentPage }
+            oldPage?.columnViews?.forEach { (pkg, view) ->
+                if (pkg in transition.retained) {
+                    oldColumnXs[pkg] = view.x
+                }
+            }
+            val applyPage: () -> Unit = applyPage@{
+                if (closed.get() || renderGeneration != appsRenderGeneration) return@applyPage
+                val appsPage = buildAppsPage(apps)
+                configureAppsPanel(apps.size, appsPage.columnWidth, appsPage.columnHeight)
+                replacePage(appsPage.view, forward = false, animate = false)
+                activeAppsPage = appsPage
+                renderedAppPackages = nextPackages
+                if (transition.entering.isNotEmpty() && transition.retained.isNotEmpty()) {
+                    startColumnEnterAnimation(
+                        transition.entering.mapNotNull(appsPage.columnViews::get),
+                    )
+                }
+                // 保留列从旧位置平滑滑动到新位置（收束动画）。
+                if (oldColumnXs.isNotEmpty()) {
+                    startRetainedColumnConvergeAnimation(appsPage.columnViews, oldColumnXs)
+                }
+                startOpenAnimation()
+            }
+            val exiting = oldPage?.columnViews
+                ?.filterKeys(transition.exiting::contains)
+                ?.values
+                .orEmpty()
+            if (exiting.isEmpty()) {
+                applyPage.invoke()
+                return
+            }
+            startColumnExitAnimation(exiting)
+            val accepted =
+                pageHost.postDelayed({ applyPage.invoke() }, columnExitSpringDurationMillis)
+            if (!accepted) {
+                log(Log.ERROR, TAG, "Volume page rejected app-column transition callback", null)
+            }
+        }
+
+        /**
+         * 复刻官方 VolumeExpandCollapsedAnimator.getVolumeAnimNode(expanded=true) 的错位节点逻辑。
+         * 第 0 列 node=0（立即开始），第 1 列=0.3，第 2 列=0.5，第 3 列=0.6，后续递增 0.1。
+         * node 值映射到 alpha = (1/(1-node)) * (progress - node)，scale = 0.4*alpha + 0.6。
+         */
+        private fun volumeAnimNodeExpanded(index: Int): Float = when (index) {
+            0 -> 0f
+            1 -> 0.3f
+            2 -> 0.5f
+            3 -> 0.6f
+            else -> 0.6f + (index - 3) * 0.1f
+        }
+
+        /**
+         * 复刻官方 VolumeExpandCollapsedAnimator.getVolumeAnimNode(expanded=false) 的折叠错位节点。
+         * 折叠时第 0 列仍然 node=0，其余列按 0.5-((count-1-i)*0.1) 递减错位。
+         */
+        private fun volumeAnimNodeCollapsed(index: Int, count: Int): Float {
+            if (index == 0) return 0f
+            return (0.5f - ((count - 1 - index) * 0.1f)).coerceAtLeast(0f)
+        }
+
+        private fun startColumnEnterAnimation(columns: List<View>) {
+            // 初始化所有列为隐藏状态
+            columns.forEach { column ->
+                column.animate().cancel()
+                column.alpha = 0f
+                column.scaleX = COLUMN_ENTER_START_SCALE
+                column.scaleY = COLUMN_ENTER_START_SCALE
+                column.translationY = dp(COLUMN_ENTER_TRANSLATION_DP).toFloat()
+            }
+            // 单一 ValueAnimator + spring 插值器驱动所有列，通过 node 错位实现依次出现。
+            // 这与官方 VolumeExpandCollapsedAnimator 的单 progress 驱动方式一致，
+            // 所有列共享同一条 spring 曲线，视觉上更连贯。
+            val enterTranslation = dp(COLUMN_ENTER_TRANSLATION_DP).toFloat()
+            ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = columnEnterSpringDurationMillis
+                interpolator = columnEnterSpringInterpolator
+                addUpdateListener { animator ->
+                    val progress = animator.animatedValue as Float
+                    columns.forEachIndexed { index, column ->
+                        val node = volumeAnimNodeExpanded(index)
+                        // 官方 alpha 映射：alpha = (1/(1-node)) * (progress - node)
+                        val rawAlpha =
+                            if (node >= 1f) 1f else (1f / (1f - node)) * (progress - node)
+                        val alpha = rawAlpha.coerceIn(0f, 1f)
+                        // 官方 scale 映射：scale = 0.4 * alpha + 0.6
+                        val scale = (0.4f * alpha + 0.6f).coerceIn(COLUMN_ENTER_START_SCALE, 1f)
+                        column.alpha = alpha
+                        column.scaleX = scale
+                        column.scaleY = scale
+                        column.translationY = enterTranslation * (1f - alpha)
+                    }
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        columns.forEach { column ->
+                            column.alpha = 1f
+                            column.scaleX = 1f
+                            column.scaleY = 1f
+                            column.translationY = 0f
+                        }
+                    }
+                })
+                start()
+            }
+        }
+
+        private fun startColumnExitAnimation(columns: Collection<View>) {
+            val columnList = columns.toList()
+            // 单一 ValueAnimator + spring 插值器驱动所有列退出，与进入动画结构对称。
+            val exitTranslation = dp(COLUMN_EXIT_TRANSLATION_DP).toFloat()
+            ValueAnimator.ofFloat(1f, 0f).apply {
+                duration = columnExitSpringDurationMillis
+                interpolator = columnExitSpringInterpolator
+                addUpdateListener { animator ->
+                    val progress = animator.animatedValue as Float
+                    columnList.forEachIndexed { index, column ->
+                        val node = volumeAnimNodeCollapsed(index, columnList.size)
+                        // 退出时 progress 从 1→0，alpha 映射同进入但方向相反
+                        val rawAlpha =
+                            if (node >= 1f) 1f else (1f / (1f - node)) * (progress - node)
+                        val alpha = rawAlpha.coerceIn(0f, 1f)
+                        val scale = (0.4f * alpha + 0.6f).coerceIn(COLUMN_EXIT_END_SCALE, 1f)
+                        column.alpha = alpha
+                        column.scaleX = scale
+                        column.scaleY = scale
+                        column.translationY = -exitTranslation * (1f - alpha)
+                    }
+                }
+                addListener(object : AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: Animator) {
+                        columnList.forEach { column ->
+                            column.alpha = 0f
+                            column.scaleX = COLUMN_EXIT_END_SCALE
+                            column.scaleY = COLUMN_EXIT_END_SCALE
+                        }
+                    }
+                })
+                start()
+            }
+        }
+
+        /**
+         * 保留列收束动画：当某些列退出后，剩余列需要从旧位置平滑滑动到新位置。
+         * 新页面构建后保留列已被放到新坐标，先把 translationX 设为旧坐标与新坐标的差值
+         * （视觉上回到旧位置），再用 spring 插值器动画 translationX→0，让列平滑滑入新位置。
+         */
+        private fun startRetainedColumnConvergeAnimation(
+            newColumnViews: Map<String, View>,
+            oldColumnXs: Map<String, Float>,
+        ) {
+            newColumnViews.forEach { (pkg, view) ->
+                val oldX = oldColumnXs[pkg] ?: return@forEach
+                val newX = view.x
+                val offset = oldX - newX
+                if (offset * offset < 1f) return@forEach // 偏移 < 1px 不动画
+                view.animate().cancel()
+                view.translationX = offset
+                view.animate()
+                    .translationX(0f)
+                    .setDuration(columnExitSpringDurationMillis)
+                    .setInterpolator(columnExitSpringInterpolator)
+                    .start()
+            }
         }
 
         private fun buildAppsPage(apps: List<LoadedAppRow>): AppsPageBuild {
@@ -914,6 +1159,8 @@ class SystemUiBuiltinVolumePanel(
                 clipChildren = false
                 clipToPadding = false
             }
+            val columnViews = LinkedHashMap<String, View>()
+            val contentInset = expandedPanelContentInset()
             var resolvedColumnWidth = fallbackColumnWidth.coerceAtLeast(dp(MIN_COLUMN_WIDTH_DP))
             var resolvedColumnHeight = if (apps.isEmpty()) {
                 dp(EMPTY_CONTENT_BODY_HEIGHT_DP)
@@ -925,16 +1172,19 @@ class SystemUiBuiltinVolumePanel(
             } else {
                 val streams =
                     SystemUiFakeStreamAllocator.allocate(apps.map { it.state.packageName })
-                val builtColumns = apps.mapIndexed { index, app ->
+                val builtColumns = apps.map { app ->
                     buildAppColumn(app, streams.getValue(app.state.packageName))
                 }
                 resolvedColumnWidth = builtColumns.maxOf(AppColumnBuild::columnWidth)
                 resolvedColumnHeight = builtColumns.maxOf(AppColumnBuild::columnHeight)
                 builtColumns.forEachIndexed { index, built ->
+                    check(columnViews.put(built.packageName, built.view) == null) {
+                        "Duplicate app column package=${built.packageName}"
+                    }
                     columns.addView(
                         built.view,
                         LinearLayout.LayoutParams(resolvedColumnWidth, resolvedColumnHeight).apply {
-                            if (index > 0) marginStart = dp(COLUMN_SPACING_DP)
+                            if (index > 0) marginStart = contentInset
                         },
                     )
                 }
@@ -954,20 +1204,16 @@ class SystemUiBuiltinVolumePanel(
                     ),
                 )
             }
+            check(SystemUiIndependentPanelPolicy.symmetricColumnInsets(contentInset).horizontal == contentInset) {
+                "Application page content inset must be symmetric"
+            }
             val content = LinearLayout(targetContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 background = null
                 clipChildren = false
                 clipToPadding = false
-                // 与官方 VolumeColumn 一致：页面只提供固定的对称 content padding，列自身
-                // 的内部 padding、thumb 和 progressView 位置不再被外层重算。
-                setPadding(
-                    dp(PANEL_HORIZONTAL_PADDING_DP),
-                    dp(PANEL_VERTICAL_PADDING_DP),
-                    dp(PANEL_HORIZONTAL_PADDING_DP),
-                    dp(PANEL_VERTICAL_PADDING_DP),
-                )
+                setPadding(contentInset, contentInset, contentInset, contentInset)
                 addView(
                     scroll,
                     LinearLayout.LayoutParams(
@@ -979,28 +1225,19 @@ class SystemUiBuiltinVolumePanel(
                     },
                 )
             }
-            return AppsPageBuild(content, resolvedColumnWidth, resolvedColumnHeight)
+            return AppsPageBuild(content, resolvedColumnWidth, resolvedColumnHeight, columnViews)
         }
 
-        private fun buildNavigationRail(): View = LinearLayout(targetContext).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            background = null
-            addView(
-                buildIconButton(
-                    resolvePluginDrawable(BACK_ICON_NAMES),
-                    moduleContext.getString(R.string.panel_back),
-                ) { close("back") },
-                LinearLayout.LayoutParams(dp(MIN_ACTION_SIZE_DP), dp(MIN_ACTION_SIZE_DP)),
-            )
-        }
-
+        @SuppressLint("RtlHardcoded")
         private fun buildAppColumn(
             row: LoadedAppRow,
             fakeStream: Int,
         ): AppColumnBuild {
             val openDetails = {
                 selectedPackage = row.state.packageName
+                appsRenderGeneration += 1L
+                activeAppsPage = null
+                renderedAppPackages = emptySet()
                 val devices = lastSnapshot?.devices.orEmpty()
                 // 参考官方 VolumeExpandCollapsedAnimator.expand：进入设备选择使用尺寸/位置
                 // 展开过渡，而不是横向翻页。先无动画替换内容，再从当前面板形态展开到设备页形态。
@@ -1030,6 +1267,7 @@ class SystemUiBuiltinVolumePanel(
                 row = row,
                 onTrackingChanged = { tracking ->
                     if (tracking) trackingUids += row.state.uid else trackingUids -= row.state.uid
+                    rescheduleOfficialDismissTimeout()
                 },
                 onVolumeCommitted = ::submitVolume,
                 onFailure = { throwable ->
@@ -1042,19 +1280,6 @@ class SystemUiBuiltinVolumePanel(
                 },
             )
             official.prepareStandaloneColumn(row.state.packageName, log)
-            OfficialVolumeColumn.installSeekBarClickListener(
-                slider = official.slider,
-                classLoader = pluginClassLoader,
-                onClick = openDetails,
-                onFailure = { throwable ->
-                    log(
-                        Log.ERROR,
-                        TAG,
-                        "Official VolumeColumn click handling failed uid=${row.state.uid}",
-                        throwable,
-                    )
-                },
-            )
             officialColumns += official
             val pixelSizes =
                 SystemUiColumnPixelSizes.fromDensity(targetContext.resources.displayMetrics.density)
@@ -1070,31 +1295,32 @@ class SystemUiBuiltinVolumePanel(
                 officialWidth = officialWidth,
                 actionSize = pixelSizes.actionSize,
             )
-            val maximumSliderHeight = (
-                    rootHeight() - dp(PANEL_EDGE_MARGIN_DP) * 2 - dp(PANEL_VERTICAL_PADDING_DP) * 2
-                    ).coerceAtLeast(dp(MIN_COLUMN_HEIGHT_DP))
-            // 完整复用官方 VolumeColumn：slider 的总高度来自 VolumeColumnRes.getHeight，
-            // root view 与 slider 保持同一尺寸，内部 padding、thumb 和 progressView 坐标均交给
-            // 官方布局处理，不再用独立轨道高度或平移覆盖官方几何。
-            val sliderHeight = resolveColumnDimension(
-                official.slider,
-                horizontal = false,
-                fallback = fallbackColumnHeight,
-            ).coerceIn(
-                dp(MIN_COLUMN_HEIGHT_DP),
-                minOf(dp(MAX_COLUMN_HEIGHT_DP), maximumSliderHeight)
+            val maximumSliderHeight =
+                rootHeight() - dp(PANEL_EDGE_MARGIN_DP) * 2 - expandedPanelContentInset() * 2
+            // 卡片高度必须严格等于官方 VolumeColumnRes.getHeight 的真实 slider 高度。
+            // 此前 coerceIn(220dp, 420dp) 会在官方高度较小时把外层卡片单独拉高，内部 slider
+            // 仍顶部对齐，因此所有差值都会表现成额外底部空白。
+            val sliderHeight = SystemUiIndependentPanelPolicy.officialColumnHeight(
+                measuredHeight = resolveColumnDimension(
+                    official.slider,
+                    horizontal = false,
+                    fallback = fallbackColumnHeight,
+                ),
+                maximumHeight = maximumSliderHeight,
             )
+            // 官方展开面板直接使用 o3_miui_volume_expend_height 的完整列高；slider padding 是
+            // 原版材质、圆角和触摸几何的一部分，不能从外层裁掉。
             // 参考官方 VolumeColumn：icon/按钮作为音量条内部的内嵌覆盖层（官方布局
             // miui_volume_dialog_column 把 icon 放在 slider 内部，用 bottomMargin 定位），
             // 而不是在音量条外面再叠一排独立槽位。更多按钮在内部顶部，应用图标在内部底部。
-            // 设备喇叭按钮已按用户要求移除，设备详情通过更多按钮或点击应用图标进入。
-            val moreButton = buildMoreButton(official.slider)
+            // 设备喇叭按钮已按用户要求移除；更多按钮的触摸严格复用官方侧边栏展开按钮路径。
+            val moreButton = buildMoreButton(official.slider, openDetails)
             // 应用图标：SoundMan 独立 ImageView，内容 = 应用图标原色（不叠加官方 tint），
             // 运行时对齐官方 slider 轨道的实际底部内部（用坐标计算，不依赖官方 icon 布局，
             // 避免官方 icon 的 tint/updateIcon 覆盖导致"蓝色/内容丢失/落在轨道下方"）。
             val appIconContentSize = dp(INNER_ICON_SIZE_DP)
             val appIconSlotSize = pixelSizes.actionSize
-            val appIconBottomInset = dp(ACTION_INSET_MARGIN_DP)
+            val overlayVerticalInset = dp(ACTION_INSET_MARGIN_DP)
             val appIcon = ImageView(targetContext).apply {
                 setImageDrawable(row.icon)
                 imageTintList = null
@@ -1114,23 +1340,13 @@ class SystemUiBuiltinVolumePanel(
                 val contentInset = (appIconSlotSize - appIconContentSize).coerceAtLeast(0) / 2
                 setPadding(contentInset, contentInset, contentInset, contentInset)
             }
-            val officialContainer = FrameLayout(targetContext).apply {
-                background = null
+            // 将覆盖层直接挂到官方 VolumeColumn 根容器：官方 SeekBar 的触摸/动画仍只作用于
+            // 原生 root，更多按钮和应用图标则天然跟随同一 scale/translation，无额外父层参与绘制。
+            val officialRoot = checkNotNull(official.view as? FrameLayout) {
+                "Official VolumeColumn root must be FrameLayout: ${official.view.javaClass.name}"
+            }.apply {
                 clipChildren = false
                 clipToPadding = false
-                (official.view as? ViewGroup)?.apply {
-                    clipChildren = false
-                    clipToPadding = false
-                }
-                addView(
-                    official.view,
-                    FrameLayout.LayoutParams(
-                        officialWidth,
-                        sliderHeight,
-                        Gravity.TOP or Gravity.CENTER_HORIZONTAL,
-                    ),
-                )
-                // 覆盖层与官方 VolumeColumn 放在同一 ViewGroup，坐标直接基于真实 slider 边界。
                 addView(
                     moreButton,
                     FrameLayout.LayoutParams(
@@ -1147,57 +1363,67 @@ class SystemUiBuiltinVolumePanel(
                         Gravity.LEFT or Gravity.TOP,
                     ),
                 )
-                var overlaysPositioned = false
-                addOnLayoutChangeListener { container, _, _, _, _, _, _, _, _ ->
-                    if (overlaysPositioned || official.slider.height <= 0 || container.height <= 0) {
-                        return@addOnLayoutChangeListener
-                    }
-                    val sliderLocation = IntArray(2)
-                    val containerLocation = IntArray(2)
-                    official.slider.getLocationOnScreen(sliderLocation)
-                    getLocationOnScreen(containerLocation)
-                    val rawSliderTop = sliderLocation[1] - containerLocation[1]
-                    val rawSliderBottom = rawSliderTop + official.slider.height
-                    val sliderTop = rawSliderTop + official.slider.paddingTop
-                    val sliderBottom = rawSliderBottom - official.slider.paddingBottom
-                    check(sliderBottom > sliderTop) {
-                        "Official slider visible bounds are empty top=$sliderTop bottom=$sliderBottom"
-                    }
-                    // 先把真正绘制轨道的中心对齐到列容器中心；不能只依赖 root/slider 高度，
-                    // 因为官方 VerticalSeekBar 的上下 padding 可能不对称。
-                    container.translationY =
-                        container.height / 2f - (sliderTop + sliderBottom) / 2f
-                    val left = (container.width - appIconSlotSize) / 2
-                    moreButton.layoutParams = FrameLayout.LayoutParams(
-                        appIconSlotSize,
-                        appIconSlotSize,
-                        Gravity.LEFT or Gravity.TOP,
-                    ).apply {
-                        leftMargin = left
-                        topMargin = sliderTop + dp(ACTION_INSET_MARGIN_DP)
-                    }
-                    appIcon.layoutParams = FrameLayout.LayoutParams(
-                        appIconSlotSize,
-                        appIconSlotSize,
-                        Gravity.LEFT or Gravity.TOP,
-                    ).apply {
-                        leftMargin = left
-                        topMargin = sliderBottom - appIconSlotSize - appIconBottomInset
-                    }
-                    overlaysPositioned = true
-                    moreButton.requestLayout()
-                    appIcon.requestLayout()
-                    log(
-                        Log.DEBUG,
-                        TAG,
-                        "Official overlay slots top=${sliderTop} bottom=${sliderBottom} " +
-                                "more=${moreButton.top} icon=${appIcon.top}",
-                        null,
-                    )
+            }
+            val officialContainer = FrameLayout(targetContext).apply {
+                background = null
+                clipChildren = false
+                clipToPadding = false
+                addView(
+                    officialRoot,
+                    FrameLayout.LayoutParams(
+                        officialWidth,
+                        sliderHeight,
+                        Gravity.TOP or Gravity.CENTER_HORIZONTAL,
+                    ),
+                )
+            }
+            var overlaysPositioned = false
+            officialContainer.addOnLayoutChangeListener { container, _, _, _, _, _, _, _, _ ->
+                if (overlaysPositioned || official.slider.height <= 0 || container.height <= 0) {
+                    return@addOnLayoutChangeListener
                 }
+                val sliderLocation = IntArray(2)
+                val containerLocation = IntArray(2)
+                official.slider.getLocationOnScreen(sliderLocation)
+                officialContainer.getLocationOnScreen(containerLocation)
+                val rawSliderTop = sliderLocation[1] - containerLocation[1]
+                val rawSliderBottom = rawSliderTop + official.slider.height
+                check(rawSliderBottom > rawSliderTop) {
+                    "Official slider bounds are empty top=$rawSliderTop bottom=$rawSliderBottom"
+                }
+                // 自定义顶部/底部覆盖元素使用同一个 inset，并相对完整官方材质边界定位，
+                // 避免 slider 内部不对称 padding 让底部看起来明显更宽。
+                val left = (container.width - appIconSlotSize) / 2
+                moreButton.layoutParams = FrameLayout.LayoutParams(
+                    appIconSlotSize,
+                    appIconSlotSize,
+                    Gravity.LEFT or Gravity.TOP,
+                ).apply {
+                    leftMargin = left
+                    topMargin = rawSliderTop + overlayVerticalInset
+                }
+                appIcon.layoutParams = FrameLayout.LayoutParams(
+                    appIconSlotSize,
+                    appIconSlotSize,
+                    Gravity.LEFT or Gravity.TOP,
+                ).apply {
+                    leftMargin = left
+                    topMargin = rawSliderBottom - appIconSlotSize - overlayVerticalInset
+                }
+                overlaysPositioned = true
+                moreButton.requestLayout()
+                appIcon.requestLayout()
+                log(
+                    Log.DEBUG,
+                    TAG,
+                    "Official overlay slots top=${rawSliderTop} bottom=${rawSliderBottom} " +
+                            "more=${moreButton.top} icon=${appIcon.top}",
+                    null,
+                )
             }
             val wrapper = FrameLayout(targetContext).apply {
                 background = null
+                // 不裁剪官方展开列：完整保留 slider 背景材质、圆角轮廓及上下 padding。
                 clipChildren = false
                 clipToPadding = false
                 addView(
@@ -1217,9 +1443,10 @@ class SystemUiBuiltinVolumePanel(
             // morph 驱动，不再对音量列做分层错峰，保证三者整体连贯。
             applyOfficialColumnLayers(1f)
             return AppColumnBuild(
-                wrapper,
-                wrapperWidth,
-                sliderHeight,
+                packageName = row.state.packageName,
+                view = wrapper,
+                columnWidth = wrapperWidth,
+                columnHeight = sliderHeight,
             )
         }
 
@@ -1248,7 +1475,10 @@ class SystemUiBuiltinVolumePanel(
                         appsPage.columnWidth,
                         appsPage.columnHeight,
                     )
+                    appsRenderGeneration += 1L
                     replacePage(appsPage.view, forward = false, animate = false)
+                    activeAppsPage = appsPage
+                    renderedAppPackages = appsPage.columnViews.keys
                     startPanelResizeAnimation(from, to) {
                         // 动画落定后把正式动画规格恢复为 apps 页形态，并精确对齐目标矩形。
                         configureAppsPanel(apps.size, appsPage.columnWidth, appsPage.columnHeight)
@@ -1323,6 +1553,7 @@ class SystemUiBuiltinVolumePanel(
                     }
                 }
 
+                @SuppressLint("ClickableViewAccessibility")
                 override fun onTouchEvent(event: MotionEvent): Boolean {
                     if (contentOverflow() || !contentDragging) return super.onTouchEvent(event)
                     // 内容未超出且已接管拖动：拖动内容 view，松手回弹。
@@ -1552,15 +1783,69 @@ class SystemUiBuiltinVolumePanel(
             currentPage = next
         }
 
+        /**
+         * 转发用户活动给官方 VolumePanelViewController，重置其自动收回超时。
+         *
+         * 官方展开面板在每次用户交互（拖滑块、点击等）时通过 rescheduleTimeoutH()
+         * 重置超时计时器（展开状态约 5000ms）。独立面板接管了交互但不触发官方
+         * 的 rescheduleTimeoutH，导致原始超时按时触发 dismissH(TIMEOUT)，
+         * 使面板比官方更早收回。此方法在用户交互时调用官方 rescheduleTimeoutH
+         * 以保持一致的自动收回节奏。
+         */
+        private fun rescheduleOfficialDismissTimeout() {
+            try {
+                rescheduleOfficialTimeout()
+            } catch (throwable: Throwable) {
+                log(Log.WARN, TAG, "Failed to reschedule official dismiss timeout", throwable)
+            }
+        }
+
         private fun submitVolume(state: SystemUiBuiltinAppRowState, percent: Int) {
+            require(percent in 0..100) { "percent must be in 0..100" }
+            rescheduleOfficialDismissTimeout()
+            val shouldSchedule = synchronized(volumeSubmissionLock) {
+                // 拖动事件可能远快于跨进程 Provider 调用。每个 UID 只保留尚未下发的最新等级，
+                // 避免把几十个历史位置排进单线程 executor，造成手指已经移动但声音仍在追赶旧值。
+                pendingVolumeSubmissions[state.uid] = PendingVolumeSubmission(state, percent)
+                drainingVolumeUids.add(state.uid)
+            }
+            if (!shouldSchedule) return
             val taskGeneration = generation.get()
-            executeBridge(taskGeneration, "set volume uid=${state.uid}") {
-                panelBridge.setVolume(state.packageName, state.uid, percent)
+            executeBridge(taskGeneration, "set live volume uid=${state.uid}") {
+                try {
+                    drainLatestVolumeSubmissions(state.uid, taskGeneration)
+                } finally {
+                    synchronized(volumeSubmissionLock) {
+                        pendingVolumeSubmissions.remove(state.uid)
+                        drainingVolumeUids.remove(state.uid)
+                    }
+                }
+            }
+        }
+
+        private fun drainLatestVolumeSubmissions(uid: Int, taskGeneration: Long) {
+            while (SystemUiGenerationGate.accepts(
+                    closed.get(),
+                    generation.get(),
+                    taskGeneration,
+                )
+            ) {
+                val submission = synchronized(volumeSubmissionLock) {
+                    pendingVolumeSubmissions.remove(uid).also { next ->
+                        if (next == null) drainingVolumeUids.remove(uid)
+                    }
+                } ?: return
+                panelBridge.setVolume(
+                    submission.state.packageName,
+                    submission.state.uid,
+                    submission.percent,
+                )
                 lastFingerprint = null
             }
         }
 
         private fun submitRoute(app: LoadedAppRow, target: OutputTarget) {
+            rescheduleOfficialDismissTimeout()
             val taskGeneration = generation.get()
             executeBridge(taskGeneration, "set route uid=${app.state.uid}") {
                 panelBridge.setRoute(app.state.packageName, app.state.uid, target)
@@ -1654,6 +1939,127 @@ class SystemUiBuiltinVolumePanel(
             if (!accepted) log(Log.ERROR, TAG, "Volume View rejected panel UI result", null)
         }
 
+        /** 由官方 dismissH 触发的清理入口；官方状态机已运行，不能递归请求关闭。 */
+        fun closeForOfficialDismiss(reason: Int) {
+            when (SystemUiOfficialDismissSessionPolicy.action(reason, closed.get())) {
+                SystemUiOfficialDismissSessionAction.IGNORE_ALREADY_CLOSING -> {
+                    log(
+                        Log.DEBUG,
+                        TAG,
+                        "Ignored official dismiss for closing independent panel reason=$reason",
+                        null,
+                    )
+                }
+
+                SystemUiOfficialDismissSessionAction.CLOSE_FROM_OFFICIAL_IMMEDIATELY -> {
+                    log(
+                        Log.INFO,
+                        TAG,
+                        "Immediately closing independent panel from official dismissH reason=$reason",
+                        null
+                    )
+                    closeImmediately(reason = "official dismiss reason=$reason")
+                }
+
+                SystemUiOfficialDismissSessionAction.CLOSE_FROM_OFFICIAL_ANIMATED -> {
+                    log(
+                        Log.INFO,
+                        TAG,
+                        "Animating independent panel close from official dismissH reason=$reason",
+                        null
+                    )
+                    closeFromOfficialDismiss(reason)
+                }
+            }
+        }
+
+        /**
+         * 官方 timeout/touch 等关闭已经启动后，自建 panel 只播放自身隐藏动画并清理；不能重新
+         * 调用 controller dismissH，也不能把官方刚隐藏的 dialog 恢复成折叠侧边栏。
+         */
+        private fun closeFromOfficialDismiss(reason: Int) {
+            if (!closed.compareAndSet(false, true)) {
+                log(
+                    Log.DEBUG,
+                    TAG,
+                    "Ignored external animated close after close started reason=$reason",
+                    null
+                )
+                return
+            }
+            val dismissGeneration = generation.incrementAndGet()
+            executor.shutdownNow()
+            if (!::panel.isInitialized || panel.parent == null || !panel.isAttachedToWindow || !openAnimationStarted) {
+                awaitExternalOfficialDismissCompletion(reason, dismissGeneration)
+                return
+            }
+            startHideSlideAwayAnimation {
+                awaitExternalOfficialDismissCompletion(reason, dismissGeneration)
+            }
+        }
+
+        /**
+         * 外部官方 dismiss 通过 VolumePanelDialog.dismiss() detach Window；以 dialog.isShown=false
+         * 作为完成信号，避免读取仍可能 VISIBLE 的旧 parent 而错误拖到超时分支。
+         */
+        private fun awaitExternalOfficialDismissCompletion(reason: Int, dismissGeneration: Long) {
+            val startedAt = android.os.SystemClock.uptimeMillis()
+            val poll = object : Runnable {
+                override fun run() {
+                    val elapsed = android.os.SystemClock.uptimeMillis() - startedAt
+                    when (
+                        SystemUiIndependentPanelPolicy.externalOfficialDismissCompletionAction(
+                            dialogShown = dialog.isShown,
+                            elapsedMillis = elapsed,
+                            timeoutMillis = OFFICIAL_DISMISS_COMPLETION_TIMEOUT_MILLIS,
+                        )
+                    ) {
+                        SystemUiOfficialDismissCompletionAction.WAIT ->
+                            uiHandler.postDelayed(this, OFFICIAL_DISMISS_POLL_INTERVAL_MILLIS)
+
+                        SystemUiOfficialDismissCompletionAction.COMPLETE -> {
+                            if (dismissGeneration != generation.get()) return
+                            // 官方父容器已隐藏，恢复自建前 dialog 状态不会回显侧边栏，却能确保下次
+                            // showH 恢复 alpha、visibility 和可访问性，不会留下不可点击的窗口状态。
+                            finishClose(
+                                reason = "official dismiss reason=$reason",
+                                afterClosed = null,
+                                dismissGeneration = dismissGeneration,
+                                requestOfficialDismiss = false,
+                                restoreOriginalDialogState = SystemUiExternalDismissCompletionPolicy
+                                    .restoreOriginalDialogState(
+                                        SystemUiOfficialDismissCompletionAction.COMPLETE,
+                                    ),
+                            )
+                        }
+
+                        SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE -> {
+                            log(
+                                Log.ERROR,
+                                TAG,
+                                "External official dismiss dialog remained shown beyond " +
+                                        "${OFFICIAL_DISMISS_COMPLETION_TIMEOUT_MILLIS}ms",
+                                null,
+                            )
+                            if (dismissGeneration != generation.get()) return
+                            // ROM 未完成官方隐藏时保持 dialog/shadow 不可见，避免透明窗口吞触摸。
+                            finishClose(
+                                reason = "official dismiss reason=$reason",
+                                afterClosed = null,
+                                dismissGeneration = dismissGeneration,
+                                requestOfficialDismiss = false,
+                                restoreOriginalDialogState = SystemUiExternalDismissCompletionPolicy
+                                    .restoreOriginalDialogState(
+                                        SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE,
+                                    ),
+                            )
+                        }
+                    }
+                }
+            }
+            uiHandler.post(poll)
+        }
+
         fun close(reason: String, afterClosed: (() -> Unit)? = null) {
             if (!closed.compareAndSet(false, true)) {
                 log(
@@ -1687,8 +2093,8 @@ class SystemUiBuiltinVolumePanel(
             slideAwayAnimator?.cancel()
             val panelRect = currentPanelRect()
             slideAwayAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = HIDE_SLIDE_ANIMATION_DURATION_MILLIS
-                interpolator = HIDE_INTERPOLATOR
+                duration = hideSpringDurationMillis
+                interpolator = hideSpringInterpolator
                 addUpdateListener { animator ->
                     val transform = SystemUiIndependentPanelPolicy.dismissTransform(
                         panel = panelRect,
@@ -1770,7 +2176,10 @@ class SystemUiBuiltinVolumePanel(
             }
         }
 
-        fun closeImmediately(reason: String) {
+        fun closeImmediately(
+            reason: String,
+            restoreOriginalDialogState: Boolean = true,
+        ) {
             if (!closed.compareAndSet(false, true)) {
                 log(
                     Log.DEBUG,
@@ -1782,7 +2191,13 @@ class SystemUiBuiltinVolumePanel(
             }
             val dismissGeneration = generation.incrementAndGet()
             executor.shutdownNow()
-            finishClose(reason, null, dismissGeneration, requestOfficialDismiss = false)
+            finishClose(
+                reason = reason,
+                afterClosed = null,
+                dismissGeneration = dismissGeneration,
+                requestOfficialDismiss = false,
+                restoreOriginalDialogState = restoreOriginalDialogState,
+            )
         }
 
         private fun releaseOfficialColumns() {
@@ -1802,6 +2217,7 @@ class SystemUiBuiltinVolumePanel(
             afterClosed: (() -> Unit)?,
             dismissGeneration: Long,
             requestOfficialDismiss: Boolean = true,
+            restoreOriginalDialogState: Boolean = true,
         ) {
             val closeState = SystemUiIndependentPanelPolicy.closeState(reason)
             check(closeState.terminal) { "Independent panel close must be terminal" }
@@ -1835,6 +2251,7 @@ class SystemUiBuiltinVolumePanel(
                         dismissGeneration = dismissGeneration,
                         reason = reason,
                         afterClosed = afterClosed,
+                        restoreOriginalDialogState = restoreOriginalDialogState,
                     )
                     log(
                         Log.INFO,
@@ -1856,7 +2273,7 @@ class SystemUiBuiltinVolumePanel(
                     }
                 }
             }
-            cleanupAndComplete(reason, afterClosed)
+            cleanupAndComplete(reason, afterClosed, restoreOriginalDialogState)
         }
 
         /**
@@ -1871,6 +2288,7 @@ class SystemUiBuiltinVolumePanel(
             dismissGeneration: Long,
             reason: String,
             afterClosed: (() -> Unit)?,
+            restoreOriginalDialogState: Boolean,
         ) {
             val startedAt = android.os.SystemClock.uptimeMillis()
             val poll = object : Runnable {
@@ -1901,7 +2319,7 @@ class SystemUiBuiltinVolumePanel(
                                     generation.get()
                                 )
                             ) {
-                                cleanupAndComplete(reason, afterClosed)
+                                cleanupAndComplete(reason, afterClosed, restoreOriginalDialogState)
                             }
                         }
                     }
@@ -1950,21 +2368,43 @@ class SystemUiBuiltinVolumePanel(
             return null
         }
 
-        private fun restoreOfficialShadowAfterDismiss() {
+        private fun restoreOfficialShadowAfterDismiss(keepHiddenWhileParentVisible: Boolean) {
             val suppression = officialShadowSuppression ?: return
             officialShadowSuppression = null
             try {
-                suppression.view.visibility = suppression.originalVisibility
-                // 父容器已被原版 reason=8 隐藏时，保持 alpha=0 交给下一次官方 show 的 preDraw；
-                // mount 失败等未进入原版 dismiss 的路径则还原原 alpha，避免遗留不可见 shadow。
                 val parentVisible = (dialog.parent as? View)?.visibility == View.VISIBLE
-                suppression.view.alpha = if (parentVisible) suppression.originalAlpha else 0f
+                when (
+                    SystemUiOfficialShadowPolicy.action(
+                        externalDismiss = keepHiddenWhileParentVisible,
+                        dialogParentVisible = parentVisible,
+                    )
+                ) {
+                    SystemUiOfficialShadowAction.KEEP_INVISIBLE -> {
+                        // 外部 dismiss 超时后父容器仍可见属于 ROM 状态机异常；shadow 绝不能作为透明
+                        // 全屏遮罩继续拦截触摸，保持 INVISIBLE 交给下一次官方 show 重建。
+                        suppression.view.alpha = 0f
+                        suppression.view.visibility = View.INVISIBLE
+                    }
+
+                    SystemUiOfficialShadowAction.RESTORE -> {
+                        suppression.view.visibility = suppression.originalVisibility
+                        // 父容器已被原版 reason=8 隐藏时，保持 alpha=0 交给下一次官方 show 的 preDraw；
+                        // mount 失败等未进入原版 dismiss 的路径则还原原 alpha，避免遗留不可见 shadow。
+                        suppression.view.alpha =
+                            if (parentVisible) suppression.originalAlpha else 0f
+                    }
+                }
             } catch (throwable: Throwable) {
                 log(Log.ERROR, TAG, "Unable to restore official shadow visibility", throwable)
             }
         }
 
-        private fun cleanupAndComplete(reason: String, afterClosed: (() -> Unit)?) {
+        @SuppressLint("ClickableViewAccessibility")
+        private fun cleanupAndComplete(
+            reason: String,
+            afterClosed: (() -> Unit)?,
+            restoreOriginalDialogState: Boolean,
+        ) {
             if (!closeFinalized.compareAndSet(false, true)) {
                 log(
                     Log.WARN,
@@ -2004,12 +2444,18 @@ class SystemUiBuiltinVolumePanel(
                 )
             }
             try {
-                dialog.alpha = originalAlpha
-                dialog.visibility = originalVisibility
-                dialog.importantForAccessibility = originalImportantForAccessibility
-                restoreOfficialShadowAfterDismiss()
+                if (restoreOriginalDialogState) {
+                    dialog.alpha = originalAlpha
+                    dialog.visibility = originalVisibility
+                    dialog.importantForAccessibility = originalImportantForAccessibility
+                }
+                // 无论由谁关闭都恢复 shadow 的原始可见性记录；外部官方 dismiss 路径不能恢复
+                // dialog 自身状态，否则会把已经隐藏的面板回显成折叠侧边栏。
+                restoreOfficialShadowAfterDismiss(
+                    keepHiddenWhileParentVisible = !restoreOriginalDialogState,
+                )
             } catch (throwable: Throwable) {
-                log(Log.ERROR, TAG, "Unable to restore original dialog state", throwable)
+                log(Log.ERROR, TAG, "Unable to finalize official dialog state", throwable)
             }
             try {
                 onClosed(this)
@@ -2030,11 +2476,10 @@ class SystemUiBuiltinVolumePanel(
             val originalAlpha: Float,
         )
 
-        private fun buildMoreButton(slider: SeekBar): ImageView =
+        private fun buildMoreButton(slider: SeekBar, openDetails: () -> Unit): ImageView =
             ImageView(targetContext).apply {
-                // 完整复刻 MiuiVolumeDialogMotion：按钮在 DOWN 时只调用 slider.doClick()，
-                // 并返回 false。FrameLayout 随后把同一完整手势交给下层 MiuiVolumeSeekBar，
-                // 官方 doClick 自行区分快速点击和音量拖动。
+                // 官方 MiuiVolumeDialogMotion 的展开按钮不自行消费触摸：仅在 ACTION_DOWN 调用
+                // MiuiVolumeSeekBar.doClick() 并返回 false，让同一事件继续落到下层 slider。
                 setImageDrawable(resolvePluginDrawable(MORE_ICON_NAMES))
                 applyOfficialExpandButtonStyle(this)
                 contentDescription = moduleContext.getString(R.string.panel_more_devices)
@@ -2047,15 +2492,17 @@ class SystemUiBuiltinVolumePanel(
                     dp(INNER_ICON_PADDING_DP),
                     dp(INNER_ICON_PADDING_DP),
                 )
-                OfficialVolumeColumn.installOfficialExpandButtonTouch(
+                OfficialVolumeColumn.bindOfficialExpandButtonTouch(
                     button = this,
                     slider = slider,
+                    classLoader = pluginClassLoader,
+                    onClick = openDetails,
                     onFailure = { throwable ->
                         log(
                             Log.ERROR,
                             TAG,
-                            "Unable to invoke official slider doClick from expand button",
-                            throwable
+                            "Official expand-button touch bridge failed",
+                            throwable,
                         )
                     },
                 )
@@ -2159,6 +2606,7 @@ class SystemUiBuiltinVolumePanel(
             }
         }
 
+        @SuppressLint("UseCompatLoadingForDrawables")
         private fun resolvePluginDrawable(names: Array<String>): Drawable {
             val cacheKey = names.joinToString("|")
             val id = pluginDrawableIdCache.getOrPut(cacheKey) {
@@ -2182,6 +2630,21 @@ class SystemUiBuiltinVolumePanel(
                 null,
             )
             return targetContext.packageManager.defaultActivityIcon
+        }
+
+        /**
+         * 官方展开面板通过 MiuiVolumeDialogRes.getBgWithContentPadding(context, true) 读取
+         * miui_volume_background_padding。应用音量页四边内距及列间距统一使用同一像素值，
+         * 避免当前 8dp/4dp 组合显得拥挤且左右边距与元素间隔不一致。
+         */
+        private fun expandedPanelContentInset(): Int {
+            expandedPanelContentInsetPx?.let { return it }
+            val resolved = resolvePluginDimension(EXPANDED_PANEL_CONTENT_INSET_NAMES)
+                ?: dp(FALLBACK_PANEL_CONTENT_INSET_DP)
+            check(resolved > 0) { "Expanded panel content inset must be positive" }
+            expandedPanelContentInsetPx = resolved
+            log(Log.INFO, TAG, "Expanded panel content inset resolved to ${resolved}px", null)
+            return resolved
         }
 
         /**
@@ -2237,13 +2700,14 @@ class SystemUiBuiltinVolumePanel(
          * attach 后再补 blend。任何一步失败都回退静态 blur 色资源，绝不让取色失败
          * 拖垮面板。
          */
+        @SuppressLint("PrivateApi")
         private fun applyOfficialExpandButtonStyle(button: ImageView) {
             // bionics 判断与官方 updateExpandButtonTint 完全一致（Util.isBionicsAdvancedMaterialEnabled）。
             val bionics = runCatching {
                 val util = pluginClassLoader.loadClass("com.android.systemui.miui.volume.Util")
                 val method = util.methods.firstOrNull {
                     it.name == "isBionicsAdvancedMaterialEnabled" &&
-                            it.parameterCount == 1 && it.parameterTypes[0] == Context::class.java
+                            it.parameterCount == 1 && it.parameterTypes[0] == classOf<Context>()
                 }
                 method?.invoke(null, targetContext) as? Boolean ?: false
             }.getOrDefault(false)
@@ -2269,12 +2733,13 @@ class SystemUiBuiltinVolumePanel(
         }
 
         /** 参考官方 MiuiVolumeDialogView.initExpandButtonBlend：高级材质走官方 blend，否则关 blur。 */
+        @SuppressLint("PrivateApi")
         private fun applyOfficialExpandButtonBlend(button: ImageView) {
             val advanced = runCatching {
                 val util = pluginClassLoader.loadClass("com.android.systemui.miui.volume.Util")
                 val method = util.methods.firstOrNull {
                     it.name == "isAdvancedMaterialEffective" &&
-                            it.parameterCount == 1 && it.parameterTypes[0] == Context::class.java
+                            it.parameterCount == 1 && it.parameterTypes[0] == classOf<Context>()
                 }
                 method?.invoke(null, targetContext) as? Boolean ?: false
             }.getOrDefault(false)
@@ -2283,8 +2748,8 @@ class SystemUiBuiltinVolumePanel(
                     val compat = pluginClassLoader.loadClass("miui.systemui.util.MiBlurCompat")
                     compat.getMethod(
                         "setMiViewBlurModeCompat",
-                        View::class.java,
-                        Int::class.javaPrimitiveType
+                        classOf<View>(),
+                        classOf<Int>()
                     )
                         .invoke(null, button, 0)
                 }.onFailure { error ->
@@ -2301,8 +2766,8 @@ class SystemUiBuiltinVolumePanel(
                 val setBlend = util.methods.firstOrNull {
                     it.name == "setMiViewBlurAndBlendColor" &&
                             it.parameterCount == 3 &&
-                            it.parameterTypes[0] == View::class.java &&
-                            it.parameterTypes[1] == Int::class.javaPrimitiveType
+                            it.parameterTypes[0] == classOf<View>() &&
+                            it.parameterTypes[1] == classOf<Int>()
                 } ?: error("Util.setMiViewBlurAndBlendColor missing")
                 setBlend.invoke(null, button, 3, blend)
             }.onFailure { error ->
@@ -2355,6 +2820,67 @@ class SystemUiBuiltinVolumePanel(
 
         private fun dp(value: Int): Int =
             (value * targetContext.resources.displayMetrics.density + 0.5f).toInt()
+
+        /**
+         * 反射创建官方 miuix.animation.utils.SpringInterpolator 实例。
+         *
+         * 官方 SpringInterpolator 构造器接受 (dampingRatio, response)，
+         * 内部自动求解 spring 收束时间（solveDuration），getDuration() 返回自然 duration。
+         * 我们用反射调用 setDampingAndResponse 来创建不同参数的 spring，
+         * 并通过 getDuration() 获取自然收束时间作为 ValueAnimator duration。
+         *
+         * 反射必要性：miuix.animation.utils.SpringInterpolator 是 MIUI 私有 API，
+         * 不在公开 SDK 中，只能通过 SystemUI 插件 ClassLoader 加载。
+         * 已验证入口点：pluginClassLoader 可从 dialog.javaClass.classLoader 获取，
+         * 无其他公开路径可到达此类。
+         */
+        private fun initSpringInterpolators() {
+            try {
+                val springClass =
+                    pluginClassLoader.loadClass("miuix.animation.utils.SpringInterpolator")
+                val constructor = springClass.getConstructor(
+                    classOf<Float>(),
+                    classOf<Float>()
+                )
+                val setDampingAndResponse = springClass.getMethod(
+                    "setDampingAndResponse",
+                    classOf<Float>(),
+                    classOf<Float>()
+                )
+                val getDuration = springClass.getMethod("getDuration")
+
+                // hide: spring(0.95, 0.3) — 对齐官方 VolumeShowHideAnimator.hide X 位移动画
+                val hideSpring = constructor.newInstance(0.85f, 0.3f)
+                setDampingAndResponse.invoke(hideSpring, 0.95f, 0.3f)
+                hideSpringInterpolator = hideSpring as android.animation.TimeInterpolator
+                hideSpringDurationMillis = getDuration.invoke(hideSpring) as Long
+
+                // enter: spring(0.82, 0.4) — 对齐官方 EASE_EXPAND_SIZE
+                val enterSpring = constructor.newInstance(0.82f, 0.4f)
+                columnEnterSpringInterpolator = enterSpring as android.animation.TimeInterpolator
+                columnEnterSpringDurationMillis = getDuration.invoke(enterSpring) as Long
+
+                // exit: spring(0.9, 0.3) — 对齐官方 EASE_COLLAPSE_SIZE
+                val exitSpring = constructor.newInstance(0.9f, 0.3f)
+                columnExitSpringInterpolator = exitSpring as android.animation.TimeInterpolator
+                columnExitSpringDurationMillis = getDuration.invoke(exitSpring) as Long
+
+                log(
+                    Log.DEBUG,
+                    TAG,
+                    "Spring interpolators initialized from official miuix: " +
+                            "hide=${hideSpringDurationMillis}ms, enter=${columnEnterSpringDurationMillis}ms, exit=${columnExitSpringDurationMillis}ms",
+                    null
+                )
+            } catch (t: Throwable) {
+                log(
+                    Log.ERROR,
+                    TAG,
+                    "Failed to create official SpringInterpolator, using fallback",
+                    t
+                )
+            }
+        }
     }
 
     private object OfficialVolumeDismissBridge {
@@ -2435,7 +2961,7 @@ class SystemUiBuiltinVolumePanel(
                 .getOrNull() ?: return emptyList()
             val dialogController = runCatching {
                 motionCallback.javaClass.declaredFields.firstNotNullOfOrNull { field ->
-                    field.isAccessible = true
+                    field.makeAccessible()
                     field.get(motionCallback)
                         ?.takeIf { it.javaClass.name == DIALOG_CONTROLLER_CLASS }
                 } ?: error("VolumePanelDialogController owner was not found from motion callback")
@@ -2447,7 +2973,7 @@ class SystemUiBuiltinVolumePanel(
                     ?: error("VolumePanelDialogController.mCallback is null")
                 val dismiss = controllerCallback.javaClass.methods.firstOrNull { method ->
                     method.name == "dismiss" && method.parameterCount == 1 &&
-                            method.parameterTypes[0] == Int::class.javaPrimitiveType
+                            method.parameterTypes[0] == classOf<Int>()
                 } ?: error("VolumePanelViewController callback dismiss(int) was not found")
                 entries += DismissEntry(
                     SystemUiOfficialDismissEntry.VIEW_CONTROLLER_CALLBACK,
@@ -2463,7 +2989,7 @@ class SystemUiBuiltinVolumePanel(
                     ?: error("VolumePanelDialogController.mDialogEventListener is null")
                 val dismiss = dialogEventListener.javaClass.methods.firstOrNull { method ->
                     method.name == "dismiss" && method.parameterCount == 1 &&
-                            method.parameterTypes[0] == Int::class.javaPrimitiveType
+                            method.parameterTypes[0] == classOf<Int>()
                 } ?: error("VolumePanelDialog.DialogEventListener.dismiss(int) was not found")
                 entries += DismissEntry(
                     SystemUiOfficialDismissEntry.DIALOG_EVENT_LISTENER,
@@ -2480,7 +3006,7 @@ class SystemUiBuiltinVolumePanel(
             while (type != null) {
                 val field = runCatching { type.getDeclaredField(name) }.getOrNull()
                 if (field != null) {
-                    field.isAccessible = true
+                    field.makeAccessible()
                     return field.get(owner)
                 }
                 type = type.superclass
@@ -2500,7 +3026,7 @@ class SystemUiBuiltinVolumePanel(
         private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
     ) {
         private val listenerType =
-            Class.forName("android.view.ViewTreeObserver\$OnComputeInternalInsetsListener")
+            "android.view.ViewTreeObserver\$OnComputeInternalInsetsListener".toClass()
         private val fullFrameListener = Proxy.newProxyInstance(
             dialog.javaClass.classLoader,
             arrayOf(listenerType),
@@ -2509,7 +3035,7 @@ class SystemUiBuiltinVolumePanel(
                 "onComputeInternalInsets" -> {
                     val info = args?.singleOrNull() ?: error("InternalInsetsInfo argument missing")
                     val intType =
-                        Int::class.javaPrimitiveType ?: error("Int primitive type unavailable")
+                        classOf<Int>()
                     info.javaClass.getMethod("setTouchableInsets", intType)
                         .invoke(info, TOUCHABLE_INSETS_FRAME)
                     null
@@ -2579,7 +3105,7 @@ class SystemUiBuiltinVolumePanel(
                 "removeOnComputeInternalInsetsListener"
             }
             try {
-                ViewTreeObserver::class.java.getMethod(methodName, listenerType)
+                classOf<ViewTreeObserver>().getMethod(methodName, listenerType)
                     .invoke(observer, listener)
             } catch (throwable: Throwable) {
                 throw IllegalStateException(
@@ -2620,44 +3146,54 @@ class SystemUiBuiltinVolumePanel(
             packageName: String,
             log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
         ) {
-            val duplicateRootBackground = view.background
-            view.background = null
+            // 官方 updateColumnH 在展开态只关闭 VolumeBlurFrameLayout 的 root backdrop blur，
+            // slider / progress / glass / expand 层全部保留，由 setSliderResource、
+            // setSliderTintColorList 与 setSliderBlendColor 共同生成原版材质。
+            val setBlurEnabled = view.javaClass.methods.firstOrNull { method ->
+                method.name == "setBlurEnabled" && method.parameterCount == 1 &&
+                        method.parameterTypes[0] == classOf<Boolean>()
+            } ?: error("Official VolumeColumn root setBlurEnabled(boolean) was not found")
+            setBlurEnabled.invoke(view, false)
+
+            // 仅隐藏官方流类型图标，给 SoundMan 的应用图标和更多按钮让位；不改任何材质层。
             icon.setImageDrawable(null)
             icon.imageTintList = null
             icon.background = null
             icon.visibility = View.INVISIBLE
-            // 独立列里官方 slider 还带着折叠态的灰色圆角底 + 玻璃模糊层（slider_bg_glass /
-            // slider_bg_blend），叠加在全窗口透明 host 上会形成“音量条后面的灰色背景阴影边框”。
-            // 保留滑块本体与进度填充（progressDrawable / progressView），只移除多余背景层。
-            glassBg.background = null
-            expandBg.background = null
-            progressViewBg.background = null
-            slider.background = null
             log(
                 Log.INFO,
                 TAG,
-                "VolumeColumn layers package=$packageName root=${duplicateRootBackground?.javaClass?.name ?: "none"} " +
-                        "slider=${slider.background?.javaClass?.name ?: "none"} " +
-                        "progress=${progressView.background?.javaClass?.name ?: "none"} " +
+                "Prepared official expanded VolumeColumn package=$packageName " +
+                        "sliderBg=${slider.background?.javaClass?.name ?: "material"} " +
+                        "progress=${progressView.background?.javaClass?.name ?: "material"} " +
                         "progressBg=${progressViewBg.background?.javaClass?.name ?: "none"} " +
                         "glass=${glassBg.background?.javaClass?.name ?: "none"} " +
-                        "expand=${expandBg.background?.javaClass?.name ?: "none"}; cleared=background-layers",
+                        "expand=${expandBg.background?.javaClass?.name ?: "none"}",
                 null,
             )
         }
 
         companion object {
             /**
-             * 复刻官方 VolumePanelViewController.processExpandTouch：
-             * 给 MiuiVolumeSeekBar 安装 SeekBarOnclickListener，点击由官方 doClick 判定，
-             * 拖动仍由原生 slider 完整处理。
+             * 一比一复制官方 MiuiVolumeDialogMotion 的展开按钮触摸链：
+             *
+             * 1. processExpandTouch 给 MiuiVolumeSeekBar 安装 SeekBarOnclickListener；
+             * 2. 展开按钮仅在 ACTION_DOWN 标记来源并调用 slider.doClick()；
+             * 3. 按钮 OnTouch 始终返回 false，同一手势继续分发给位于下层的 slider；
+             * 4. MiuiVolumeSeekBar.doClick(MotionEvent) 自己用 200ms/20px 阈值区分点击与拖动，
+             *    超过阈值时把当前 MOVE 改写成 ACTION_DOWN 后交还原生 SeekBar。
+             *
+             * 唯一替换点是官方 callback.onExpandClicked() 改为 SoundMan 的设备详情回调。
              */
-            fun installSeekBarClickListener(
+            @SuppressLint("ClickableViewAccessibility")
+            fun bindOfficialExpandButtonTouch(
+                button: ImageView,
                 slider: SeekBar,
                 classLoader: ClassLoader,
                 onClick: () -> Unit,
                 onFailure: (Throwable) -> Unit,
             ) {
+                var isExpandButton = false
                 try {
                     val setter = slider.javaClass.methods.firstOrNull { method ->
                         method.name == "setSeekBarOnclickListener" && method.parameterCount == 1
@@ -2671,11 +3207,14 @@ class SystemUiBuiltinVolumePanel(
                         arrayOf(listenerType),
                     ) { proxy, method, arguments ->
                         when (method.name) {
-                            "toString" -> "SoundManOfficialSliderClickListener"
+                            "toString" -> "SoundManOfficialExpandSeekBarListener"
                             "hashCode" -> System.identityHashCode(proxy)
                             "equals" -> proxy === arguments?.singleOrNull()
                             "onClick" -> {
-                                onClick()
+                                if (isExpandButton) {
+                                    onClick()
+                                    isExpandButton = false
+                                }
                                 null
                             }
 
@@ -2683,29 +3222,20 @@ class SystemUiBuiltinVolumePanel(
                         }
                     }
                     setter.invoke(slider, listener)
+                    val doClick = slider.javaClass.getMethod("doClick")
+                    button.setOnTouchListener { _, event ->
+                        if (event.action == MotionEvent.ACTION_DOWN) {
+                            try {
+                                isExpandButton = true
+                                doClick.invoke(slider)
+                            } catch (throwable: Throwable) {
+                                onFailure(throwable)
+                            }
+                        }
+                        false
+                    }
                 } catch (throwable: Throwable) {
                     onFailure(throwable)
-                }
-            }
-
-            /**
-             * 复刻官方 MiuiVolumeDialogMotion：顶部展开按钮只调用官方 doClick，且返回 false，
-             * 让下层 MiuiVolumeSeekBar 接管完整的 DOWN/MOVE/UP 序列。
-             */
-            fun installOfficialExpandButtonTouch(
-                button: ImageView,
-                slider: SeekBar,
-                onFailure: (Throwable) -> Unit,
-            ) {
-                button.setOnTouchListener { _, event ->
-                    if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                        try {
-                            slider.javaClass.getMethod("doClick").invoke(slider)
-                        } catch (throwable: Throwable) {
-                            onFailure(throwable)
-                        }
-                    }
-                    false
                 }
             }
 
@@ -2748,7 +3278,7 @@ class SystemUiBuiltinVolumePanel(
                             "hashCode" -> System.identityHashCode(proxy)
                             "equals" -> proxy === arguments?.singleOrNull()
                             // 官方 getHeightArray 返回 {topMargin, topMargin, topMargin, ringerDivider}；
-                            // 独立列无 ringer/dnd 区域，提供 slider 自身高度保证位移计算不越界。
+                            // 独立列无 ringer/dnd 区域，提供官方 VolumeColumn 根高度保证位移计算不越界。
                             "getHeightArray" -> intArrayOf(0, 0, 0, columnView.height)
                             "resetView" -> {
                                 columnView.scaleX = 1f
@@ -2797,11 +3327,11 @@ class SystemUiBuiltinVolumePanel(
                 java.lang.Boolean.TYPE -> false
                 java.lang.Byte.TYPE -> 0.toByte()
                 java.lang.Short.TYPE -> 0.toShort()
-                java.lang.Integer.TYPE -> 0
+                Integer.TYPE -> 0
                 java.lang.Long.TYPE -> 0L
                 java.lang.Float.TYPE -> 0f
                 java.lang.Double.TYPE -> 0.0
-                java.lang.Character.TYPE -> '\u0000'
+                Character.TYPE -> '\u0000'
                 else -> null
             }
 
@@ -2815,16 +3345,16 @@ class SystemUiBuiltinVolumePanel(
                 onVolumeCommitted: (SystemUiBuiltinAppRowState, Int) -> Unit,
                 onFailure: (Throwable) -> Unit,
             ): OfficialVolumeColumn {
-                val columnClass = Class.forName(VOLUME_COLUMN_CLASS, true, classLoader)
+                val columnClass = VOLUME_COLUMN_CLASS.toClass(classLoader, true)
                 val column = columnClass.getConstructor().newInstance()
                 val booleanType =
-                    Boolean::class.javaPrimitiveType ?: error("Boolean primitive type unavailable")
+                    classOf<Boolean>()
                 val intType =
-                    Int::class.javaPrimitiveType ?: error("Int primitive type unavailable")
+                    classOf<Int>()
                 columnClass.getMethod(
                     "initColumn",
-                    Context::class.java,
-                    ViewGroup::class.java,
+                    classOf<Context>(),
+                    classOf<ViewGroup>(),
                     intType,
                     booleanType,
                     booleanType,
@@ -2833,11 +3363,13 @@ class SystemUiBuiltinVolumePanel(
                 // 该版本 initColumn 会在绑定 icon 前调用 setExpanded；必须先以折叠态完成 View 初始化，
                 // 再切到展开态，否则 observable 回调会访问尚未初始化的 icon。
                 columnClass.getMethod("setExpanded", booleanType).invoke(column, true)
+                // 严格复刻 VolumePanelViewController.updateColumnH 的展开态顺序：
+                // resource -> tint -> size，随后用上一帧折叠态触发 setSliderBlendColor 过渡。
+                columnClass.getMethod("setSliderResource", booleanType).invoke(column, true)
+                columnClass.getMethod("setSliderTintColorList", booleanType).invoke(column, true)
                 columnClass.getMethod("setSize", booleanType, booleanType)
                     .invoke(column, true, false)
-                columnClass.getMethod("setSliderResource", booleanType).invoke(column, true)
                 columnClass.getMethod("setSliderBlendColor", booleanType).invoke(column, false)
-                columnClass.getMethod("onMaterialModeChanged").invoke(column)
 
                 val view = columnClass.getMethod("getView").invoke(column) as? View
                     ?: error("VolumeColumn.getView returned non-View")
@@ -2845,7 +3377,6 @@ class SystemUiBuiltinVolumePanel(
                     ?: error("VolumeColumn.getSlider returned non-SeekBar")
                 val icon = columnClass.getMethod("getIcon").invoke(column) as? ImageView
                     ?: error("VolumeColumn.getIcon returned non-ImageView")
-                installColumnAnimListener(slider, view, classLoader, onFailure)
                 val progressView = columnClass.getMethod("getProgressView").invoke(column) as? View
                     ?: error("VolumeColumn.getProgressView returned non-View")
                 val progressViewBg =
@@ -2858,12 +3389,11 @@ class SystemUiBuiltinVolumePanel(
                 val updateSliderRatio = columnClass.getMethod("updateSliderRatio")
                 val setTracking = columnClass.getMethod("setTracking", booleanType)
                 val setMaxLevel = progressView.javaClass.getMethod("setMaxLevel", intType)
-                val setVolumeLevel = progressView.javaClass.getMethod(
-                    "setVolumeLevel",
-                    Float::class.javaPrimitiveType
+                val toProgressWithAnim = progressView.javaClass.getMethod(
+                    "toProgressWithAnim",
+                    booleanType,
+                    classOf<SeekBar>(),
                 )
-                val updateProgressHeight =
-                    progressView.javaClass.getMethod("updateProgressHeight", SeekBar::class.java)
 
                 icon.contentDescription = null
                 slider.max = SystemUiOfficialSliderProgress.MAX
@@ -2871,38 +3401,37 @@ class SystemUiBuiltinVolumePanel(
                     SystemUiOfficialSliderProgress.fromPercent(row.state.volumePercent)
                 slider.contentDescription = row.state.label
                 setMaxLevel.invoke(progressView, 100)
-                setVolumeLevel.invoke(progressView, row.state.volumePercent.toFloat())
-                updateProgressHeight.invoke(progressView, slider)
+                // 与官方 VolumeSeekBarChangeListener 一致：进度填充统一走
+                // MiuiVolumeSeekBarProgressView.toProgressWithAnim，而不是每帧手动重设 level/outline。
+                toProgressWithAnim.invoke(progressView, false, slider)
                 updateSliderRatio.invoke(column)
                 val dragSession = SystemUiSliderDragSession()
-                // 拖动/点击过程中同步官方进度填充层高度，避免滑块动了但填充层滞后的“假卡顿”。
-                val refreshProgressView = { currentProgress: Int ->
-                    try {
-                        val percent =
-                            SystemUiOfficialSliderProgress.toPercent(currentProgress).toFloat()
-                        setVolumeLevel.invoke(progressView, percent)
-                        updateProgressHeight.invoke(progressView, slider)
-                    } catch (throwable: Throwable) {
-                        onFailure(throwable)
-                    }
-                }
                 slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(
                         seekBar: SeekBar,
                         progress: Int,
                         fromUser: Boolean
                     ) {
-                        if (fromUser) {
-                            dragSession.move()
-                            // 拖动中实时刷新官方进度填充层，否则进度条视觉完全不跟随手势，
-                            // 配合上面的动画 listener 恢复拖动反馈。
-                            refreshProgressView(progress)
+                        try {
+                            // 官方实现无论来源都更新填充层；用户拖动时使用 Folme 动画，程序更新时直接落位。
+                            toProgressWithAnim.invoke(progressView, fromUser, seekBar)
+                            if (!fromUser) return
+                            val level = SystemUiOfficialSliderProgress.toPercent(progress)
+                            dragSession.move(level) { changedLevel ->
+                                // 对照官方 VolumeSeekBarChangeListener：跨到新等级即实时下发，
+                                // 不再等 ACTION_UP，音量反馈与手指位置同步。
+                                onVolumeCommitted(row.state, changedLevel)
+                            }
+                        } catch (throwable: Throwable) {
+                            onFailure(throwable)
                         }
                     }
 
                     override fun onStartTrackingTouch(seekBar: SeekBar) {
                         try {
-                            dragSession.start()
+                            dragSession.start(
+                                SystemUiOfficialSliderProgress.toPercent(seekBar.progress)
+                            )
                             setTracking.invoke(column, true)
                             onTrackingChanged(true)
                         } catch (throwable: Throwable) {
@@ -2913,13 +3442,12 @@ class SystemUiBuiltinVolumePanel(
 
                     override fun onStopTrackingTouch(seekBar: SeekBar) {
                         try {
-                            val action = dragSession.stop(seekBar.progress) { finalProgress ->
-                                onVolumeCommitted(
-                                    row.state,
-                                    SystemUiOfficialSliderProgress.toPercent(finalProgress),
-                                )
+                            dragSession.stop(
+                                SystemUiOfficialSliderProgress.toPercent(seekBar.progress)
+                            ) { finalLevel ->
+                                // 极短点击可能没有产生中间 onProgressChanged，停止时补交最终等级。
+                                onVolumeCommitted(row.state, finalLevel)
                             }
-                            if (action != SystemUiSliderCommitAction.COMMIT_FINAL) return
                             setTracking.invoke(column, false)
                             onTrackingChanged(false)
                         } catch (throwable: Throwable) {
@@ -2928,6 +3456,7 @@ class SystemUiBuiltinVolumePanel(
                         }
                     }
                 })
+                installColumnAnimListener(slider, view, classLoader, onFailure)
                 return OfficialVolumeColumn(
                     instance = column,
                     view = view,
@@ -2944,6 +3473,7 @@ class SystemUiBuiltinVolumePanel(
     }
 
     private data class AppColumnBuild(
+        val packageName: String,
         val view: View,
         val columnWidth: Int,
         val columnHeight: Int,
@@ -2953,6 +3483,7 @@ class SystemUiBuiltinVolumePanel(
         val view: View,
         val columnWidth: Int,
         val columnHeight: Int,
+        val columnViews: Map<String, View>,
     )
 
     private data class LoadedAppRow(
@@ -2966,6 +3497,11 @@ class SystemUiBuiltinVolumePanel(
         val apps: List<LoadedAppRow>
     )
 
+    private data class PendingVolumeSubmission(
+        val state: SystemUiBuiltinAppRowState,
+        val percent: Int,
+    )
+
     companion object {
         private const val TAG = "SoundMan.BuiltinPanel"
         private const val HOST_TAG = "hk.uwu.soundman:independent_volume_host"
@@ -2976,19 +3512,22 @@ class SystemUiBuiltinVolumePanel(
         private const val PANEL_EDGE_MARGIN_DP = 12
         private const val PANEL_HORIZONTAL_PADDING_DP = 8
         private const val PANEL_VERTICAL_PADDING_DP = 8
-        private const val NAVIGATION_WIDTH_DP = 48
-        private const val COLUMN_SPACING_DP = 4
-        private const val APP_ICON_SIZE_DP = 32
+        private const val FALLBACK_PANEL_CONTENT_INSET_DP = 16
         private const val APP_ICON_RASTER_SIZE_DP = 96
-        private const val APP_ICON_SLOT_HEIGHT_DP = 44
-        private const val MIN_ACTION_SIZE_DP = 40
-        private const val ACTION_SLOT_HEIGHT_DP = 48
-        private const val ACTION_SPACING_DP = 8
         private const val ACTION_INSET_MARGIN_DP = 8
 
         // 应用图标尺寸（音量条内部底部展示）。
         private const val INNER_ICON_SIZE_DP = 26
         private const val INNER_ICON_PADDING_DP = 6
+
+        // 列进入/退出动画——对齐官方 FolmeEase.spring 参数。
+        // EASE_EXPAND_SIZE = spring(0.82, 0.4), EASE_COLLAPSE_SIZE = spring(0.9, 0.3)
+        // duration 由官方 SpringInterpolator.getDuration() 自动计算，此处仅为反射失败时的兜底。
+        private const val COLUMN_TRANSITION_DURATION_FALLBACK_MILLIS = 600L
+        private const val COLUMN_ENTER_START_SCALE = 0.6f
+        private const val COLUMN_EXIT_END_SCALE = 0.6f
+        private const val COLUMN_ENTER_TRANSLATION_DP = 12
+        private const val COLUMN_EXIT_TRANSLATION_DP = 8
 
         // reason=8 原版关闭会将 dialog 父容器设为 INVISIBLE；主线程下一帧即可观察到。
         // 仅为异常 ROM 保留有限超时，避免官方状态机未落位时无限占用独立 host。
@@ -2998,9 +3537,7 @@ class SystemUiBuiltinVolumePanel(
         private const val HEADER_ICON_SIZE_DP = 26
         private const val MIN_COLUMN_WIDTH_DP = 64
         private const val MAX_COLUMN_WIDTH_DP = 104
-        private const val APP_COLUMN_MIN_WIDTH_DP = 84
         private const val MIN_COLUMN_HEIGHT_DP = 220
-        private const val MAX_COLUMN_HEIGHT_DP = 420
         private const val EMPTY_CONTENT_WIDTH_DP = 180
         private const val EMPTY_CONTENT_BODY_HEIGHT_DP = 96
         private const val DEVICE_PAGE_WIDTH_DP = 340
@@ -3009,7 +3546,6 @@ class SystemUiBuiltinVolumePanel(
 
         // 设备行内左右留白：图标与圆角边框之间需要更宽的呼吸距离，独立于页面横向 padding。
         private const val DEVICE_ROW_HORIZONTAL_PADDING_DP = 16
-        private const val DEVICE_PAGE_VERTICAL_PADDING_DP = 14
         private const val DEVICE_PAGE_ROW_SPACING_DP = 10
         private const val DEVICE_ROW_HEIGHT_DP = 62
 
@@ -3020,12 +3556,17 @@ class SystemUiBuiltinVolumePanel(
         private const val PER_USER_RANGE = 100_000
         private const val PAGE_ANIMATION_DURATION_MILLIS = 350L
         private const val EXPAND_ANIMATION_DURATION_MILLIS = 470L
-        private const val HIDE_SLIDE_ANIMATION_DURATION_MILLIS = 320L
+
+        // 反射创建官方 SpringInterpolator 失败时的兜底 duration。
+        private const val HIDE_SLIDE_ANIMATION_DURATION_FALLBACK_MILLIS = 760L
 
         private const val COLUMN_TRANSLATION_Z_DP = 20
         private const val POLL_INTERVAL_MILLIS = 750L
         private val EXPAND_INTERPOLATOR = PathInterpolator(0.2f, 0f, 0f, 1f)
-        private val HIDE_INTERPOLATOR = SpringTimeInterpolator(damping = 1.0f, stiffness = 2.5f)
+        private val EXPANDED_PANEL_CONTENT_INSET_NAMES = arrayOf(
+            // MiuiVolumeDialogRes.getBgWithContentPadding(context, true)
+            "miui_volume_background_padding",
+        )
         private val BACK_ICON_NAMES = arrayOf(
             "ic_arrow_back",
             "miuix_appcompat_action_mode_back_arrow",
@@ -3054,23 +3595,5 @@ class SystemUiBuiltinVolumePanel(
         private fun dimension(vararg candidates: Int?): Int =
             candidates.firstOrNull { it != null && it > 0 }
                 ?: error("Required live View dimension is unavailable")
-    }
-}
-
-/** 近似官方 VolumeShowHideAnimator.hide 使用的阻尼弹簧时间曲线。 */
-private class SpringTimeInterpolator(
-    private val damping: Float,
-    private val stiffness: Float,
-    private val scale: Float = 3f,
-) : android.animation.TimeInterpolator {
-    private val omegaD = kotlin.math.sqrt((stiffness - damping * damping).coerceAtLeast(1e-6f))
-
-    override fun getInterpolation(input: Float): Float {
-        val t = input.coerceIn(0f, 1f) * scale
-        val decay = kotlin.math.exp(-damping * t)
-        return (1f - decay * (kotlin.math.cos(omegaD * t) + (damping / omegaD) * kotlin.math.sin(
-            omegaD * t
-        )))
-            .coerceIn(0f, 1f)
     }
 }

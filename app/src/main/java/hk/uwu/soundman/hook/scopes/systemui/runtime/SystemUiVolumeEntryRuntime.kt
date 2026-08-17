@@ -1,5 +1,6 @@
 package hk.uwu.soundman.hook.scopes.systemui.runtime
 
+import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Context
@@ -17,15 +18,14 @@ import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import androidx.core.view.isVisible
+import com.highcapable.kavaref.extension.makeAccessible
 import hk.uwu.soundman.R
 import hk.uwu.soundman.hook.scopes.systemui.hidden.OfficialRingerBlur
 import hk.uwu.soundman.overlay.OverlayOpenRequest
 import java.lang.ref.WeakReference
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 /** 在 HyperOS 紧凑音量侧栏的音量条上方插入 SoundMan 圆钮入口。 */
@@ -34,7 +34,11 @@ class SystemUiVolumeEntryRuntime(
     private val builtinPanelEnabled: () -> Boolean = { false },
 ) {
     private val officialDismissHook = SystemUiOfficialDismissHookBridge(log)
-    private val builtinPanel = SystemUiBuiltinVolumePanel(log, officialDismissHook::dismiss)
+    private val builtinPanel = SystemUiBuiltinVolumePanel(
+        log = log,
+        hookDismiss = officialDismissHook::dismiss,
+        rescheduleOfficialTimeout = officialDismissHook::rescheduleTimeout,
+    )
     private val trackedEntries = ArrayList<TrackedEntry>()
     private val pendingInsertions = ArrayList<PendingInsertion>()
     private val closing = AtomicBoolean(false)
@@ -59,86 +63,17 @@ class SystemUiVolumeEntryRuntime(
         officialDismissHook.capture(controller, dismiss)
     }
 
-    /** 在各目标 View 所属 UI Looper 上同步移除入口；失败时保留追踪状态供后续重试。 */
-    fun cleanupInsertedEntries(): Boolean {
-        val alreadyClosing = withLifecycleLock {
-            if (closing.get()) {
-                true
-            } else {
-                closing.set(true)
-                false
-            }
-        }
-        if (alreadyClosing) return false
-
-        return try {
-            if (!awaitActiveInsertions()) {
-                cancelCleanup()
-                false
-            } else {
-                val pendingSnapshot = synchronized(pendingInsertions) { pendingInsertions.toList() }
-                val entrySnapshot = synchronized(trackedEntries) { trackedEntries.toList() }
-                val pendingCleaned = pendingSnapshot.map(::cancelPendingOnUiLooper).all { it }
-                val entriesCleaned = entrySnapshot.map { entry ->
-                    val view = entry.view.get()
-                    view == null || cleanupOnUiLooper(entry.uiLooper, view)
-                }.all { it }
-                if (!pendingCleaned || !entriesCleaned) {
-                    cancelCleanup()
-                    false
-                } else {
-                    val pendingRemain = synchronized(pendingInsertions) {
-                        pendingInsertions.removeAll(pendingSnapshot.toSet())
-                        pendingInsertions.isNotEmpty()
-                    }
-                    val trackedEntriesRemain = synchronized(trackedEntries) {
-                        trackedEntries.removeAll(entrySnapshot.toSet())
-                        trackedEntries.removeAll { it.view.get() == null }
-                        trackedEntries.isNotEmpty()
-                    }
-                    if (pendingRemain || trackedEntriesRemain) {
-                        log(Log.ERROR, TAG, "Volume entry cleanup left callbacks, listeners, or buttons behind", null)
-                        cancelCleanup()
-                        false
-                    } else {
-                        true
-                    }
-                }
-            }
+    /** 官方 controller 已执行 dismissH 时由 hooker 通知。 */
+    fun onOfficialVolumeDismiss(reason: Int) {
+        try {
+            builtinPanel.closeForOfficialDismiss(reason)
         } catch (throwable: Throwable) {
-            cancelCleanup()
-            log(Log.ERROR, TAG, "Failed to clean up SoundMan volume entries", throwable)
-            false
-        }
-    }
-
-    private fun awaitActiveInsertions(): Boolean {
-        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MILLIS)
-        withLifecycleLock {
-            while (activeInsertions != 0) {
-                val remainingNanos = deadlineNanos - System.nanoTime()
-                if (remainingNanos <= 0L) {
-                    log(Log.ERROR, TAG, "Timed out waiting for volume entry insertion", null)
-                    return false
-                }
-                try {
-                    insertionsIdle.awaitNanos(remainingNanos)
-                } catch (interrupted: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    log(Log.ERROR, TAG, "Interrupted while waiting for volume entry insertion", interrupted)
-                    return false
-                }
-            }
-        }
-        return true
-    }
-
-    /** 取消 teardown，使旧 hook 在 cleanup 失败后继续工作。 */
-    fun cancelCleanup() {
-        withLifecycleLock {
-            closing.set(false)
-            if (activeInsertions < 0) activeInsertions = 0
-            insertionsIdle.signalAll()
+            log(
+                Log.ERROR,
+                TAG,
+                "Unable to close builtin panel from official dismissH reason=$reason",
+                throwable
+            )
         }
     }
 
@@ -148,124 +83,6 @@ class SystemUiVolumeEntryRuntime(
             return block()
         } finally {
             lifecycleLock.unlock()
-        }
-    }
-
-    private fun cancelPendingOnUiLooper(pending: PendingInsertion): Boolean {
-        val cancel = Runnable { cancelPending(pending) }
-        if (Looper.myLooper() === pending.uiLooper) {
-            cancel.run()
-            return true
-        }
-
-        val completed = CountDownLatch(1)
-        val failure = AtomicReference<Throwable?>()
-        val task = Runnable {
-            try {
-                cancel.run()
-            } catch (throwable: Throwable) {
-                failure.set(throwable)
-            } finally {
-                completed.countDown()
-            }
-        }
-        val handler = Handler(pending.uiLooper)
-        if (!handler.post(task)) {
-            log(Log.ERROR, TAG, "Target UI Looper rejected pending volume entry callback cleanup", null)
-            return false
-        }
-        return try {
-            if (!completed.await(CLEANUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                handler.removeCallbacks(task)
-                log(Log.ERROR, TAG, "Timed out cleaning pending volume entry callback", null)
-                false
-            } else {
-                val throwable = failure.get()
-                if (throwable == null) true else {
-                    log(Log.ERROR, TAG, "Failed to clean pending volume entry callback", throwable)
-                    false
-                }
-            }
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            handler.removeCallbacks(task)
-            log(Log.ERROR, TAG, "Interrupted cleaning pending volume entry callback", interrupted)
-            false
-        }
-    }
-
-    private fun cleanupOnUiLooper(uiLooper: Looper, entry: View): Boolean {
-        if (Looper.myLooper() === uiLooper) return cleanupEntryAndPanel(entry)
-
-        val completed = CountDownLatch(1)
-        val failure = AtomicReference<Throwable?>()
-        val taskState = AtomicReference(CleanupTaskState.PENDING)
-        val cleanupTask = Runnable {
-            synchronized(taskState) {
-                if (taskState.get() == CleanupTaskState.CANCELLED) {
-                    completed.countDown()
-                    return@Runnable
-                }
-                taskState.set(CleanupTaskState.RUNNING)
-            }
-            try {
-                if (!cleanupEntryAndPanel(entry)) {
-                    failure.set(IllegalStateException("SoundMan volume entry cleanup failed"))
-                }
-            } catch (throwable: Throwable) {
-                failure.set(throwable)
-            } finally {
-                synchronized(taskState) { taskState.set(CleanupTaskState.FINISHED) }
-                completed.countDown()
-            }
-        }
-        val handler = Handler(uiLooper)
-        if (!handler.post(cleanupTask)) {
-            log(Log.ERROR, TAG, "Target UI Looper rejected SoundMan volume entry cleanup", null)
-            return false
-        }
-        var interrupted = false
-        try {
-            var timedOut = false
-            val completedWithinTimeout = try {
-                completed.await(CLEANUP_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            } catch (_: InterruptedException) {
-                interrupted = true
-                false
-            }
-            if (!completedWithinTimeout) {
-                val cancelled = synchronized(taskState) {
-                    if (taskState.get() == CleanupTaskState.PENDING) {
-                        taskState.set(CleanupTaskState.CANCELLED)
-                        true
-                    } else {
-                        false
-                    }
-                }
-                if (cancelled) {
-                    handler.removeCallbacks(cleanupTask)
-                    log(Log.ERROR, TAG, "Cancelled queued SoundMan volume entry cleanup", null)
-                    return false
-                }
-
-                timedOut = !interrupted
-                while (true) {
-                    try {
-                        completed.await()
-                        break
-                    } catch (_: InterruptedException) {
-                        interrupted = true
-                    }
-                }
-            }
-            if (timedOut) {
-                log(Log.ERROR, TAG, "Running SoundMan volume entry cleanup exceeded timeout and completed", null)
-            }
-            val throwable = failure.get() ?: return true
-            log(Log.ERROR, TAG, "Failed to clean up SoundMan volume entry", throwable)
-            return false
-        } finally {
-            if (interrupted) Thread.currentThread().interrupt()
         }
     }
 
@@ -696,17 +513,7 @@ class SystemUiVolumeEntryRuntime(
         private const val ENTRY_TAG = "hk.uwu.soundman:volume_entry"
         private const val VOLUME_DIALOG_VIEW_CLASS =
             "com.android.systemui.miui.volume.MiuiVolumeDialogView"
-        private const val CLEANUP_TIMEOUT_SECONDS = 5L
-        private const val CLEANUP_TIMEOUT_MILLIS = CLEANUP_TIMEOUT_SECONDS * 1000L
         private const val REPEATED_LOG_INTERVAL_MILLIS = 2_000L
-
-        private enum class CleanupTaskState {
-            PENDING,
-            RUNNING,
-            FINISHED,
-            CANCELLED,
-        }
-
 
         private fun insertEntry(
             root: View,
@@ -910,7 +717,7 @@ class SystemUiVolumeEntryRuntime(
                 log(Log.ERROR, TAG, "Theme live blur is on but official chrome blend failed; skip insertion", null)
                 return false
             }
-            val newMaterial = liveApplied && officialBlur?.usedNewMaterialChrome() == true
+            val newMaterial = liveApplied && officialBlur.usedNewMaterialChrome() == true
             blurLayer.background = if (newMaterial) null else blurBackground
             if (liveApplied) {
                 chrome.background = null
@@ -1064,6 +871,7 @@ class SystemUiVolumeEntryRuntime(
             return drawable
         }
 
+        @SuppressLint("UseCompatLoadingForDrawables")
         private fun resolveNamedDrawable(
             context: Context,
             packages: List<String>,
@@ -1167,7 +975,7 @@ class SystemUiVolumeEntryRuntime(
             timerLayout: View?,
             log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
         ) {
-            val expanded = timerLayout != null && timerLayout.visibility == View.VISIBLE
+            val expanded = timerLayout != null && timerLayout.isVisible
             entry.visibility = SystemUiVolumeEntryLayout.entryVisibility(expanded)
             if (expanded) {
                 log(Log.INFO, TAG, "Volume entry hidden because DND timer_layout is already visible", null)
@@ -1498,7 +1306,54 @@ private class SystemUiOfficialDismissHookBridge(
         }
     }
 
+    /**
+     * 通过反射调用官方 VolumePanelViewController.rescheduleTimeoutH()，
+     * 重置官方自动收回超时计时器。
+     *
+     * 动机：独立面板接管了用户交互（调音量、拖滑块等），但官方控制器的超时
+     * 仍在运行且不会被用户交互重置。如果不转发用户活动，原始超时会按时触发
+     * dismissH(TIMEOUT)，导致独立面板比官方展开面板更早被收回。
+     *
+     * 官方展开面板（mExpanded=true）的超时为 Constant.MAX_STR_LENGTH=5000ms，
+     * 折叠面板的超时为 DIALOG_TIMEOUT_MILLIS（更短）。
+     * 独立面板在展开状态下挂载，但官方控制器的 mExpanded 可能未被正确设置，
+     * 导致 rescheduleTimeoutH 用了短超时。因此调用前先确保 mExpanded=true。
+     *
+     * rescheduleTimeoutH 和 mExpanded 都是 VolumePanelViewController 的 private 成员，
+     * 无法通过公开 API 访问；已确认 VolumePanelViewController 实例已被 showH hook 捕获，
+     * 此处通过反射操作。
+     */
+    fun rescheduleTimeout(): Boolean {
+        val owner = controller.get()
+        if (owner == null) {
+            log(
+                Log.ERROR,
+                TAG,
+                "Official rescheduleTimeout has no live VolumePanelViewController",
+                null
+            )
+            return false
+        }
+        return try {
+            // 确保 mExpanded=true，使 computeTimeoutH() 返回展开状态的长超时（5000ms）
+            // 而非折叠状态的短超时。
+            val expandedField = owner.javaClass.getDeclaredField("mExpanded")
+            expandedField.makeAccessible()
+            if (!expandedField.getBoolean(owner)) {
+                expandedField.setBoolean(owner, true)
+            }
+            val method = owner.javaClass.getDeclaredMethod("rescheduleTimeoutH")
+            method.makeAccessible()
+            method.invoke(owner)
+            true
+        } catch (throwable: Throwable) {
+            log(Log.ERROR, TAG, "Official rescheduleTimeoutH failed", throwable)
+            false
+        }
+    }
+
     companion object {
         private const val TAG = "SoundMan.SystemUiDismiss"
     }
 }
+

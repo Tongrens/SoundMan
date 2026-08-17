@@ -3,6 +3,7 @@ package hk.uwu.soundman.hook.scopes.systemui
 import android.util.Log
 import android.view.View
 import com.highcapable.kavaref.KavaRef.Companion.resolve
+import com.highcapable.kavaref.extension.classOf
 import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
 import hk.uwu.soundman.data.AppSettingsDefaults
 import hk.uwu.soundman.data.AppSettingsKeys
@@ -121,7 +122,7 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
                 )
             }
             .getOrNull() ?: return
-        val intType = Int::class.javaPrimitiveType ?: error("Int primitive type unavailable")
+        val intType = classOf<Int>()
         val dismissMethod = clazz.methods.firstOrNull { method ->
             method.name == METHOD_DISMISS_H && method.parameterTypes.contentEquals(arrayOf(intType))
         } ?: run {
@@ -154,6 +155,40 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
                 }
             }
             YLog.info("Installed official controller capture hook: ${method.self.toGenericString()}")
+        }
+        val dismissMethods = safeResolve(
+            block = { resolved.method { name = METHOD_DISMISS_H } },
+            onFailure = { error ->
+                YLog.error(
+                    "Official controller dismissH lifecycle hook missing",
+                    error
+                )
+            },
+        )
+        dismissMethods.forEach { method ->
+            method.hook {
+                after {
+                    try {
+                        if (throwable != null) return@after
+                        val reason = args.getOrNull(0) as? Int
+                        if (reason == null) {
+                            YLog.error(
+                                "Official controller dismissH lifecycle has no Int reason: " +
+                                        "signature=${method.self.toGenericString()} arg0=${
+                                            args.getOrNull(
+                                                0
+                                            )?.javaClass?.name
+                                        }",
+                            )
+                            return@after
+                        }
+                        runtime.onOfficialVolumeDismiss(reason)
+                    } catch (error: Throwable) {
+                        YLog.error("Official controller dismissH lifecycle callback failed", error)
+                    }
+                }
+            }
+            YLog.info("Installed official controller dismissH lifecycle hook: ${method.self.toGenericString()}")
         }
     }
 

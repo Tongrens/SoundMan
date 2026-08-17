@@ -43,6 +43,81 @@ object SystemUiBuiltinPanelState {
         rows.distinctBy { it.uid }.sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.label })
 }
 
+/** 应用列刷新时的稳定集合差异，package name 是列的唯一标识。 */
+data class SystemUiAppColumnTransition(
+    val retained: Set<String>,
+    val entering: Set<String>,
+    val exiting: Set<String>,
+)
+
+object SystemUiAppColumnTransitions {
+    fun resolve(previous: Set<String>, next: Set<String>): SystemUiAppColumnTransition {
+        require(previous.none(String::isBlank) && next.none(String::isBlank)) {
+            "app column packages must not be blank"
+        }
+        return SystemUiAppColumnTransition(
+            retained = previous intersect next,
+            entering = next - previous,
+            exiting = previous - next,
+        )
+    }
+}
+
+object SystemUiOfficialDismissReasons {
+    const val TIMEOUT = 3
+    const val SCREEN_OFF = 4
+}
+
+/** 精确复刻 VolumePanelViewController.dismissH 的 isShown 前置条件。 */
+object SystemUiOfficialDismissGate {
+    fun accepts(
+        controllerShowing: Boolean,
+        needsDialog: Boolean,
+        dialogShown: Boolean,
+    ): Boolean = !(controllerShowing && needsDialog && !dialogShown)
+}
+
+enum class SystemUiOfficialDismissSessionAction {
+    CLOSE_FROM_OFFICIAL_ANIMATED,
+    CLOSE_FROM_OFFICIAL_IMMEDIATELY,
+    IGNORE_ALREADY_CLOSING,
+}
+
+enum class SystemUiOfficialShadowAction { RESTORE, KEEP_INVISIBLE }
+
+object SystemUiOfficialShadowPolicy {
+    fun action(
+        externalDismiss: Boolean,
+        dialogParentVisible: Boolean,
+    ): SystemUiOfficialShadowAction =
+        if (externalDismiss && dialogParentVisible) {
+            SystemUiOfficialShadowAction.KEEP_INVISIBLE
+        } else {
+            SystemUiOfficialShadowAction.RESTORE
+        }
+}
+
+object SystemUiExternalDismissCompletionPolicy {
+    /** 只有官方父容器已隐藏后才能恢复自建前保存的 dialog 状态。 */
+    fun restoreOriginalDialogState(action: SystemUiOfficialDismissCompletionAction): Boolean =
+        when (action) {
+            SystemUiOfficialDismissCompletionAction.COMPLETE -> true
+            SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE -> false
+            SystemUiOfficialDismissCompletionAction.WAIT -> error("External dismiss must not finalize while waiting")
+        }
+}
+
+/** 官方 controller 已经开始关闭时，自建 session 只能清理自身，不能递归再次 dismissH。 */
+object SystemUiOfficialDismissSessionPolicy {
+    fun action(reason: Int, sessionClosing: Boolean): SystemUiOfficialDismissSessionAction = when {
+        sessionClosing -> SystemUiOfficialDismissSessionAction.IGNORE_ALREADY_CLOSING
+        reason == SystemUiOfficialDismissReasons.SCREEN_OFF ->
+            SystemUiOfficialDismissSessionAction.CLOSE_FROM_OFFICIAL_IMMEDIATELY
+
+        else -> SystemUiOfficialDismissSessionAction.CLOSE_FROM_OFFICIAL_ANIMATED
+    }
+}
+
 data class SystemUiPanelRect(
     val left: Int,
     val top: Int,
@@ -84,6 +159,17 @@ data class SystemUiCompactPanelLayout(
     val visibleColumns: Int,
     val scrollable: Boolean,
 )
+
+/** 展开卡片中音量列的对称内容边距几何。 */
+data class SystemUiSymmetricColumnInsets(
+    val horizontal: Int,
+    val vertical: Int,
+) {
+    init {
+        require(horizontal >= 0 && vertical >= 0) { "column insets must not be negative" }
+        require(horizontal == vertical) { "volume column insets must be symmetric" }
+    }
+}
 
 data class SystemUiColumnRegions(
     val slider: SystemUiHitRect,
@@ -148,7 +234,7 @@ data class SystemUiIndependentCloseState(
     val dismissOfficialSession: Boolean,
 )
 
-enum class SystemUiSliderCommitAction { NONE, LOCAL_FRAME_ONLY, COMMIT_FINAL }
+enum class SystemUiSliderCommitAction { NONE, COMMIT_LIVE, COMMIT_FINAL }
 
 enum class SystemUiOfficialDismissEntry { VIEW_CONTROLLER_CALLBACK, DIALOG_EVENT_LISTENER, HOOK_CONTROLLER }
 
@@ -246,22 +332,40 @@ object SystemUiDrawablePixelVisibility {
 
 class SystemUiSliderDragSession {
     private var tracking = false
-    private var committed = false
+    private var lastCommittedLevel: Int? = null
 
-    fun start() {
+    /**
+     * 记录拖动开始时已经生效的等级。
+     *
+     * 官方 VolumeSeekBarChangeListener 会在每次用户进度跨到新等级时立即下发音量，停止拖动仅做
+     * 状态收尾；这里保留相同语义，避免把所有声音变化推迟到 ACTION_UP。
+     */
+    fun start(initialLevel: Int) {
+        require(initialLevel >= 0) { "initialLevel must not be negative" }
         tracking = true
-        committed = false
+        lastCommittedLevel = initialLevel
     }
 
-    fun move(): SystemUiSliderCommitAction =
-        if (tracking) SystemUiSliderCommitAction.LOCAL_FRAME_ONLY else SystemUiSliderCommitAction.NONE
+    fun move(level: Int, commit: (Int) -> Unit): SystemUiSliderCommitAction =
+        commitChangedLevel(level, SystemUiSliderCommitAction.COMMIT_LIVE, commit)
 
-    fun stop(finalProgress: Int, commit: (Int) -> Unit): SystemUiSliderCommitAction {
-        if (!tracking || committed) return SystemUiSliderCommitAction.NONE
+    fun stop(finalLevel: Int, commit: (Int) -> Unit): SystemUiSliderCommitAction {
+        if (!tracking) return SystemUiSliderCommitAction.NONE
+        val action = commitChangedLevel(finalLevel, SystemUiSliderCommitAction.COMMIT_FINAL, commit)
         tracking = false
-        committed = true
-        commit(finalProgress)
-        return SystemUiSliderCommitAction.COMMIT_FINAL
+        return action
+    }
+
+    private fun commitChangedLevel(
+        level: Int,
+        action: SystemUiSliderCommitAction,
+        commit: (Int) -> Unit,
+    ): SystemUiSliderCommitAction {
+        require(level >= 0) { "level must not be negative" }
+        if (!tracking || level == lastCommittedLevel) return SystemUiSliderCommitAction.NONE
+        lastCommittedLevel = level
+        commit(level)
+        return action
     }
 }
 
@@ -272,6 +376,18 @@ data class SystemUiPanelSnapshotFingerprint(
 
 /** 独立 sibling 页的纯布局与快照策略，不读取或改变官方 controller 状态。 */
 object SystemUiIndependentPanelPolicy {
+    fun symmetricColumnInsets(contentInset: Int): SystemUiSymmetricColumnInsets {
+        require(contentInset >= 0) { "contentInset must not be negative" }
+        return SystemUiSymmetricColumnInsets(contentInset, contentInset)
+    }
+
+    /** 保留官方测得的 VolumeColumn 高度，不施加额外最小/最大卡片高度。 */
+    fun officialColumnHeight(measuredHeight: Int, maximumHeight: Int): Int {
+        require(measuredHeight > 0 && maximumHeight > 0) { "column heights must be positive" }
+        require(measuredHeight <= maximumHeight) { "official column must fit the panel" }
+        return measuredHeight
+    }
+
     fun compactLayout(
         appCount: Int,
         availableWidth: Int,
@@ -498,7 +614,7 @@ object SystemUiIndependentPanelPolicy {
     fun sliderCommitAction(tracking: Boolean, stopTracking: Boolean): SystemUiSliderCommitAction =
         when {
             stopTracking -> SystemUiSliderCommitAction.COMMIT_FINAL
-            tracking -> SystemUiSliderCommitAction.LOCAL_FRAME_ONLY
+            tracking -> SystemUiSliderCommitAction.COMMIT_LIVE
             else -> SystemUiSliderCommitAction.NONE
         }
 
@@ -528,6 +644,24 @@ object SystemUiIndependentPanelPolicy {
         require(timeoutMillis > 0L) { "timeoutMillis must be positive" }
         return when {
             !dialogParentVisible -> SystemUiOfficialDismissCompletionAction.COMPLETE
+            elapsedMillis >= timeoutMillis -> SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE
+            else -> SystemUiOfficialDismissCompletionAction.WAIT
+        }
+    }
+
+    /**
+     * 外部 timeout/touch dismiss 由 VolumePanelDialog.dismiss() 直接 detach Window；此时旧的
+     * View parent 可能仍是 VISIBLE，必须以 dialog.isShown() 为完成信号。
+     */
+    fun externalOfficialDismissCompletionAction(
+        dialogShown: Boolean,
+        elapsedMillis: Long,
+        timeoutMillis: Long,
+    ): SystemUiOfficialDismissCompletionAction {
+        require(elapsedMillis >= 0L) { "elapsedMillis must not be negative" }
+        require(timeoutMillis > 0L) { "timeoutMillis must be positive" }
+        return when {
+            !dialogShown -> SystemUiOfficialDismissCompletionAction.COMPLETE
             elapsedMillis >= timeoutMillis -> SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE
             else -> SystemUiOfficialDismissCompletionAction.WAIT
         }
