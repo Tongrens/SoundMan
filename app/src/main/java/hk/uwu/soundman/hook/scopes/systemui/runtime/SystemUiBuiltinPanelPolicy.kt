@@ -126,6 +126,12 @@ data class SystemUiIndependentPanelAnimationSpec(
     val expanded: SystemUiPanelRect,
 )
 
+data class SystemUiIndependentDismissTransform(
+    val translationX: Float,
+    val translationY: Float,
+    val scale: Float,
+)
+
 data class SystemUiVolumeColumnLayerState(
     val alpha: Float,
     val scale: Float,
@@ -145,6 +151,33 @@ data class SystemUiIndependentCloseState(
 enum class SystemUiSliderCommitAction { NONE, LOCAL_FRAME_ONLY, COMMIT_FINAL }
 
 enum class SystemUiOfficialDismissEntry { VIEW_CONTROLLER_CALLBACK, DIALOG_EVENT_LISTENER, HOOK_CONTROLLER }
+
+enum class SystemUiOfficialDismissCompletionAction { WAIT, COMPLETE, FORCE_COMPLETE }
+
+/**
+ * 官方 dismissH completion 的一次性门闩。
+ *
+ * 关闭动画是异步的；门闩把启动代次绑定到回调代次，避免重复回调或旧 session 回调
+ * 在新状态上执行 host/材质/触摸区域清理。
+ */
+class SystemUiOfficialDismissCompletionGate {
+    private var startedGeneration: Long? = null
+    private var completed = false
+
+    @Synchronized
+    fun begin(generation: Long): Boolean {
+        if (startedGeneration != null || completed) return false
+        startedGeneration = generation
+        return true
+    }
+
+    @Synchronized
+    fun complete(generation: Long, currentGeneration: Long): Boolean {
+        if (completed || startedGeneration != generation || generation != currentGeneration) return false
+        completed = true
+        return true
+    }
+}
 
 object SystemUiOfficialDismissSequence {
     fun firstSuccessful(
@@ -295,6 +328,17 @@ object SystemUiIndependentPanelPolicy {
             SystemUiPanelHit.OUTSIDE
         }
 
+    /**
+     * 单一展开按钮的列宽。
+     *
+     * 官方 VolumeColumn 只需容纳 slider；SoundMan 当前仅保留一个顶部按钮，不能继续使用
+     * 双按钮 actionContentWidth，否则会凭空扩大左右留白。
+     */
+    fun singleActionColumnWidth(officialWidth: Int, actionSize: Int): Int {
+        require(officialWidth > 0 && actionSize > 0) { "column dimensions must be positive" }
+        return maxOf(officialWidth, actionSize)
+    }
+
     fun columnRegions(
         columnWidth: Int,
         sliderWidth: Int,
@@ -352,6 +396,10 @@ object SystemUiIndependentPanelPolicy {
         val requestedLeft = if (anchoredRight) folded.right - expandedWidth else folded.left
         val expandedLeft =
             requestedLeft.coerceIn(edgeMargin, parentWidth - edgeMargin - expandedWidth)
+        // 展开面板与折叠音量条保持平行：垂直位置锚定折叠入口顶部，不做屏幕级居中，
+        // 否则面板会从音量条旁边被移走（用户反馈"卡片位置被往下移"）。
+        // 面板内部音量条的上下对称由列轨道高度（trackHeight）保证，与面板在屏幕
+        // 上的位置无关；这里只负责让卡片出现在音量条旁的正确位置。
         val expandedTop =
             folded.top.coerceIn(edgeMargin, parentHeight - edgeMargin - expandedHeight)
         return SystemUiIndependentPanelAnimationSpec(
@@ -376,6 +424,26 @@ object SystemUiIndependentPanelPolicy {
             top = lerp(spec.folded.top, spec.expanded.top),
             right = lerp(spec.folded.right, spec.expanded.right),
             bottom = lerp(spec.folded.bottom, spec.expanded.bottom),
+        )
+    }
+
+    /**
+     * 计算独立 panel 的官方 hide 风格终态：沿屏幕水平边缘滑出，同时向下移动并缩放到 0.8。
+     * 该变换只服务于自建 panel；官方 dialog 的真正结束仍由 dismissH completion 决定。
+     */
+    fun dismissTransform(
+        panel: SystemUiPanelRect,
+        rootWidth: Int,
+        fraction: Float,
+    ): SystemUiIndependentDismissTransform {
+        require(rootWidth > 0) { "rootWidth must be positive" }
+        require(fraction in 0f..1f) { "fraction must be in 0..1" }
+        val anchoredRight = panel.left + panel.width / 2 >= rootWidth / 2
+        val targetX = if (anchoredRight) rootWidth + panel.width else -(panel.width * 2)
+        return SystemUiIndependentDismissTransform(
+            translationX = targetX * fraction,
+            translationY = panel.height / 3f * fraction,
+            scale = 1f - 0.2f * fraction,
         )
     }
 
@@ -442,6 +510,27 @@ object SystemUiIndependentPanelPolicy {
         if (hasViewControllerCallback) add(SystemUiOfficialDismissEntry.VIEW_CONTROLLER_CALLBACK)
         if (hasDialogEventListener) add(SystemUiOfficialDismissEntry.DIALOG_EVENT_LISTENER)
         if (hasHookController) add(SystemUiOfficialDismissEntry.HOOK_CONTROLLER)
+    }
+
+    /**
+     * 决定官方 reason=8 dismiss 的完成时机。
+     *
+     * JADX 已确认原版 `setVolumeDialogVisible(false, …)` 会把 MiuiVolumeDialogView 的直接父
+     * View 设为 INVISIBLE，且展开页的 `collapse(false, …)` 在该状态后同步收尾。该父容器
+     * 隐藏是可靠完成信号；超时仅处理 ROM 异常导致官方状态机未落位的场景。
+     */
+    fun officialDismissCompletionAction(
+        dialogParentVisible: Boolean,
+        elapsedMillis: Long,
+        timeoutMillis: Long,
+    ): SystemUiOfficialDismissCompletionAction {
+        require(elapsedMillis >= 0L) { "elapsedMillis must not be negative" }
+        require(timeoutMillis > 0L) { "timeoutMillis must be positive" }
+        return when {
+            !dialogParentVisible -> SystemUiOfficialDismissCompletionAction.COMPLETE
+            elapsedMillis >= timeoutMillis -> SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE
+            else -> SystemUiOfficialDismissCompletionAction.WAIT
+        }
     }
 
     fun fingerprint(snapshot: PanelPlaybackSnapshot): SystemUiPanelSnapshotFingerprint =

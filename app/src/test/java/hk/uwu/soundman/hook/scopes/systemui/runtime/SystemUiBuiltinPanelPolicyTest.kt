@@ -84,16 +84,41 @@ class SystemUiBuiltinPanelPolicyTest {
             expandedWidth = 360,
             expandedHeight = 600,
             parentWidth = 1080,
+            parentHeight = 2400,
         )
         val left = SystemUiIndependentPanelPolicy.animationSpec(
             folded = SystemUiPanelRect(120, 40, 300, 340),
             expandedWidth = 360,
             expandedHeight = 600,
             parentWidth = 1080,
+            parentHeight = 2400,
         )
 
+        // 水平按最近边缘锚定；垂直锚定折叠入口顶部，保证卡片与音量条平行。
         assertEquals(SystemUiPanelRect(600, 40, 960, 640), right.expanded)
         assertEquals(SystemUiPanelRect(120, 40, 480, 640), left.expanded)
+    }
+
+    @Test
+    fun independentPanelExpandedRectAnchorsFoldedTopRegardlessOfParentHeight() {
+        val highParent = SystemUiIndependentPanelPolicy.animationSpec(
+            folded = SystemUiPanelRect(840, 60, 960, 360),
+            expandedWidth = 360,
+            expandedHeight = 436,
+            parentWidth = 1080,
+            parentHeight = 2400,
+        )
+        val lowParent = SystemUiIndependentPanelPolicy.animationSpec(
+            folded = SystemUiPanelRect(840, 60, 960, 360),
+            expandedWidth = 360,
+            expandedHeight = 436,
+            parentWidth = 1080,
+            parentHeight = 1600,
+        )
+
+        // 展开面板顶部始终锚定折叠入口顶部（与音量条平行），不做屏幕级居中。
+        assertEquals(60, highParent.expanded.top)
+        assertEquals(60, lowParent.expanded.top)
     }
 
     @Test
@@ -106,6 +131,51 @@ class SystemUiBuiltinPanelPolicyTest {
         assertEquals(
             SystemUiPanelRect(450, 70, 1020, 520),
             SystemUiIndependentPanelPolicy.interpolateRect(spec, 0.5f),
+        )
+    }
+
+    @Test
+    fun independentPanelDismissTransformSlidesOutAndKeepsOfficialScaleProfile() {
+        val right = SystemUiIndependentPanelPolicy.dismissTransform(
+            panel = SystemUiPanelRect(840, 100, 960, 400),
+            rootWidth = 1080,
+            fraction = 1f,
+        )
+        val left = SystemUiIndependentPanelPolicy.dismissTransform(
+            panel = SystemUiPanelRect(120, 100, 300, 400),
+            rootWidth = 1080,
+            fraction = 1f,
+        )
+        val start = SystemUiIndependentPanelPolicy.dismissTransform(
+            panel = SystemUiPanelRect(840, 100, 960, 400),
+            rootWidth = 1080,
+            fraction = 0f,
+        )
+
+        assertEquals(1_200f, right.translationX, 0.0001f)
+        assertEquals(-360f, left.translationX, 0.0001f)
+        assertEquals(100f, right.translationY, 0.0001f)
+        assertEquals(0.8f, right.scale, 0.0001f)
+        assertEquals(0f, start.translationX, 0.0001f)
+        assertEquals(0f, start.translationY, 0.0001f)
+        assertEquals(1f, start.scale, 0.0001f)
+    }
+
+    @Test
+    fun singleActionColumnWidthDoesNotReserveRemovedSecondButton() {
+        assertEquals(
+            64,
+            SystemUiIndependentPanelPolicy.singleActionColumnWidth(
+                officialWidth = 64,
+                actionSize = 40,
+            ),
+        )
+        assertEquals(
+            48,
+            SystemUiIndependentPanelPolicy.singleActionColumnWidth(
+                officialWidth = 32,
+                actionSize = 48,
+            ),
         )
     }
 
@@ -414,6 +484,57 @@ class SystemUiBuiltinPanelPolicyTest {
                 hasHookController = false,
             ).isEmpty(),
         )
+    }
+
+    @Test
+    fun officialDismissCompletionRunsOnlyForCurrentGenerationAndOnlyOnce() {
+        val gate = SystemUiOfficialDismissCompletionGate()
+
+        assertTrue(gate.begin(7L))
+        assertFalse(gate.begin(8L))
+        assertFalse(gate.complete(6L, 7L))
+        assertFalse(gate.complete(7L, 8L))
+        assertTrue(gate.complete(7L, 7L))
+        assertFalse(gate.complete(7L, 7L))
+    }
+
+    @Test
+    fun officialDismissCompletesWhenOriginalDialogParentBecomesInvisible() {
+        assertEquals(
+            SystemUiOfficialDismissCompletionAction.COMPLETE,
+            SystemUiIndependentPanelPolicy.officialDismissCompletionAction(
+                dialogParentVisible = false,
+                elapsedMillis = 16L,
+                timeoutMillis = 1_000L,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialDismissCompletionAction.WAIT,
+            SystemUiIndependentPanelPolicy.officialDismissCompletionAction(
+                dialogParentVisible = true,
+                elapsedMillis = 999L,
+                timeoutMillis = 1_000L,
+            ),
+        )
+        assertEquals(
+            SystemUiOfficialDismissCompletionAction.FORCE_COMPLETE,
+            SystemUiIndependentPanelPolicy.officialDismissCompletionAction(
+                dialogParentVisible = true,
+                elapsedMillis = 1_000L,
+                timeoutMillis = 1_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun staleCompletionFromPreviousSessionCannotFinalizeNewGeneration() {
+        val oldSession = SystemUiOfficialDismissCompletionGate()
+        val newSession = SystemUiOfficialDismissCompletionGate()
+
+        assertTrue(oldSession.begin(11L))
+        assertTrue(newSession.begin(12L))
+        assertFalse(oldSession.complete(11L, 12L))
+        assertTrue(newSession.complete(12L, 12L))
     }
 
     @Test
