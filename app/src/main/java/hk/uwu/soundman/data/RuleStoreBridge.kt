@@ -33,6 +33,7 @@ data class PanelPlaybackRow(
     val followsSystemAfterDisconnect: Boolean = false,
     val label: String? = null,
     val iconPng: ByteArray? = null,
+    val isSystemApp: Boolean = false,
 ) {
     init {
         require(packageName.isNotBlank()) { "packageName must not be blank" }
@@ -67,6 +68,7 @@ data class PanelPlaybackRow(
         if (outputTarget != other.outputTarget) return false
         if (label != other.label) return false
         if (!iconPng.contentEquals(other.iconPng)) return false
+        if (isSystemApp != other.isSystemApp) return false
 
         return true
     }
@@ -79,6 +81,7 @@ data class PanelPlaybackRow(
         result = 31 * result + outputTarget.hashCode()
         result = 31 * result + (label?.hashCode() ?: 0)
         result = 31 * result + (iconPng?.contentHashCode() ?: 0)
+        result = 31 * result + isSystemApp.hashCode()
         return result
     }
 }
@@ -113,6 +116,7 @@ object RuleStoreBridgeContract {
     const val KEY_VOLUME_PERCENT = "volumePercent"
     const val KEY_OUTPUT_TARGET = "outputTarget"
     const val KEY_REVISION = "revision"
+    const val KEY_IS_SYSTEM_APP = "isSystemApp"
     val URI: Uri = "content://$AUTHORITY".toUri()
 }
 
@@ -157,6 +161,7 @@ class RuleStoreBridgeProvider : ContentProvider() {
                                 followsSystemAfterDisconnect = rule.followsSystemAfterDisconnect,
                                 label = app.label.takeIf(String::isNotBlank),
                                 iconPng = encodePanelIcon(app.icon, app.packageName, app.uid),
+                                isSystemApp = app.isSystemApp,
                             )
                         },
                         devices = playbackSource.currentDeviceScan().devices,
@@ -353,6 +358,10 @@ class RuleStoreBridgeProvider : ContentProvider() {
                         RuleStoreBridgeContract.KEY_FOLLOWS_SYSTEM_AFTER_DISCONNECT,
                         row.followsSystemAfterDisconnect,
                     )
+                    putBoolean(
+                        RuleStoreBridgeContract.KEY_IS_SYSTEM_APP,
+                        row.isSystemApp,
+                    )
                 }
             }),
         )
@@ -460,6 +469,9 @@ class ProviderPanelPlayback(private val systemUiContext: Context) {
                         ?.takeIf(String::isNotBlank),
                     iconPng = row.getByteArray(RuleStoreBridgeContract.KEY_ICON_PNG)
                         ?.takeIf(ByteArray::isNotEmpty),
+                    isSystemApp = row.getBoolean(
+                        RuleStoreBridgeContract.KEY_IS_SYSTEM_APP,
+                    ),
                 )
             },
             devices = devices.map(SoundManProtocol::decodeDevice),

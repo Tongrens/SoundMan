@@ -67,6 +67,7 @@ class SystemUiBuiltinVolumePanel(
     private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
     private val hookDismiss: () -> Boolean,
     private val rescheduleOfficialTimeout: () -> Boolean,
+    private val hideSystemAppsEnabled: () -> Boolean = { false },
 ) {
     fun closeFor(sourceView: View) {
         try {
@@ -126,6 +127,7 @@ class SystemUiBuiltinVolumePanel(
                 log = log,
                 hookDismiss = hookDismiss,
                 rescheduleOfficialTimeout = rescheduleOfficialTimeout,
+                hideSystemAppsEnabled = hideSystemAppsEnabled,
                 onClosed = { closedSession ->
                     synchronized(sessions) {
                         if (sessions[dialog] === closedSession) sessions.remove(dialog)
@@ -173,6 +175,7 @@ class SystemUiBuiltinVolumePanel(
         private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
         private val hookDismiss: () -> Boolean,
         private val rescheduleOfficialTimeout: () -> Boolean,
+        private val hideSystemAppsEnabled: () -> Boolean,
         private val onClosed: (Session) -> Unit,
     ) {
         private val closed = AtomicBoolean(false)
@@ -687,8 +690,14 @@ class SystemUiBuiltinVolumePanel(
 
         private fun loadSnapshot(snapshot: PanelPlaybackSnapshot): LoadedSnapshot {
             val packageManager = targetContext.packageManager
+            val hideSystemApps = hideSystemAppsEnabled()
+            val filteredRows = if (hideSystemApps) {
+                snapshot.rows.filter { !it.isSystemApp }
+            } else {
+                snapshot.rows
+            }
             val loadedByUid =
-                snapshot.rows.associateBy(PanelPlaybackRow::uid).mapValues { (_, row) ->
+                filteredRows.associateBy(PanelPlaybackRow::uid).mapValues { (_, row) ->
                     val cacheKey = "${row.uid}:${row.packageName}"
                     val cached = appVisualCache[cacheKey]
                     val visual = if (cached != null) {
@@ -980,6 +989,21 @@ class SystemUiBuiltinVolumePanel(
             val nextPackages = apps.map { it.state.packageName }.toSet()
             val transition = SystemUiAppColumnTransitions.resolve(renderedAppPackages, nextPackages)
             val renderGeneration = ++appsRenderGeneration
+            // 应用列表完全没变时（只是音量百分比变化），原地更新 slider 位置，
+            // 不重建页面、不触发收束动画。重建页面会导致新 View 尚未 layout，
+            // view.x 为 0，startRetainedColumnConvergeAnimation 误判所有列需要从
+            // 旧位置滑到 0，表现为"第二个音量条及后面的从右侧滑过来"。
+            if (transition.entering.isEmpty() && transition.exiting.isEmpty() &&
+                activeAppsPage?.view === currentPage && officialColumns.isNotEmpty()
+            ) {
+                val columnsByPackage = officialColumns.associateBy { it.packageName }
+                apps.forEach { row ->
+                    val column = columnsByPackage[row.state.packageName]
+                    column?.updateVolume(row.state.volumePercent)
+                }
+                startOpenAnimation()
+                return
+            }
             // 在构建新页面前，记录保留列在旧页面中的 X 坐标，
             // 用于退出动画完成后让保留列平滑滑动到新位置，而非瞬移。
             val oldColumnXs = HashMap<String, Float>()
@@ -3137,9 +3161,24 @@ class SystemUiBuiltinVolumePanel(
         private val glassBg: View,
         private val expandBg: View,
         private val releaseMethod: Method,
+        private val updateProgressMethod: Method,
+        val packageName: String,
     ) {
         fun release() {
             releaseMethod.invoke(instance)
+        }
+
+        /**
+         * 原地更新音量百分比，不重建列。
+         *
+         * 动机：音量调整触发轮询 re-render 时，应用列表没变不应重建整个页面。
+         * 通过保存的 [updateProgressMethod]（MiuiVolumeSeekBarProgressView.toProgressWithAnim）
+         * 直接更新 slider 位置和填充层，避免页面重建引发收束动画。
+         */
+        fun updateVolume(percent: Int) {
+            require(percent in 0..100) { "percent must be in 0..100" }
+            slider.progress = SystemUiOfficialSliderProgress.fromPercent(percent)
+            updateProgressMethod.invoke(progressView, false, slider)
         }
 
         fun prepareStandaloneColumn(
@@ -3467,6 +3506,8 @@ class SystemUiBuiltinVolumePanel(
                     glassBg = glassBg,
                     expandBg = expandBg,
                     releaseMethod = columnClass.getMethod("release"),
+                    updateProgressMethod = toProgressWithAnim,
+                    packageName = row.state.packageName,
                 )
             }
         }

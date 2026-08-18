@@ -308,6 +308,7 @@ class HostPlaybackSource(
                 label = info.loadLabel(packageManager).toString(),
                 uid = uid,
                 icon = info.loadIcon(packageManager),
+                isSystemApp = info.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM != 0,
             )
         } catch (error: PackageManager.NameNotFoundException) {
             AppLog.warn("Active uid=$uid package=$packageName is no longer installed", error)

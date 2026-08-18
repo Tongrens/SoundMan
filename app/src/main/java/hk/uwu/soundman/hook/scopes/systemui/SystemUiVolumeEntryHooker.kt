@@ -27,6 +27,7 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
     private val runtime = SystemUiVolumeEntryRuntime(
         log = ::writeLog,
         builtinPanelEnabled = ::isBuiltinPanelEnabled,
+        hideSystemAppsEnabled = ::isHideSystemAppsEnabled,
     )
     private val pluginClassLoaderReader = SystemUiPluginClassLoader()
     private val pluginClassLoaderAttach = SystemUiPluginClassLoaderAttach()
@@ -272,6 +273,23 @@ object SystemUiVolumeEntryHooker : YukiBaseHooker() {
     } catch (error: Throwable) {
         YLog.error("Unable to read SystemUI builtin panel setting through Yuki prefs", error)
         AppSettingsDefaults.SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED
+    }
+
+    private fun isHideSystemAppsEnabled(): Boolean = try {
+        val modulePrefs = prefs(SYSTEM_UI_SETTINGS_PREFERENCES_NAME)
+        val entries = modulePrefs.all()
+        val value = entries[AppSettingsKeys.HIDE_SYSTEM_APPS]
+        val enabled = when (value) {
+            null -> AppSettingsDefaults.HIDE_SYSTEM_APPS_ENABLED
+            is Boolean -> value
+            else -> error(
+                "Invalid ${AppSettingsKeys.HIDE_SYSTEM_APPS} type=${value.javaClass.name}",
+            )
+        }
+        enabled
+    } catch (error: Throwable) {
+        YLog.error("Unable to read hide-system-apps setting through Yuki prefs", error)
+        AppSettingsDefaults.HIDE_SYSTEM_APPS_ENABLED
     }
 
     private fun writeLog(priority: Int, tag: String, message: String, throwable: Throwable?) {

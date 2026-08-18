@@ -69,12 +69,15 @@ data class AppAudioRule(
 
 /**
  * 面板中的可调节应用。图标由 PackageManager 直接提供，避免复制应用资源。
+ *
+ * @param isSystemApp 是否为系统应用（`ApplicationInfo.FLAG_SYSTEM`），供"隐藏系统应用"设置过滤。
  */
 data class AdjustableApp(
     val packageName: String,
     val label: String,
     val uid: Int,
     val icon: Drawable,
+    val isSystemApp: Boolean = false,
 )
 
 /**

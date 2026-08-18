@@ -15,6 +15,8 @@
     <string name="settings_volume_percent_summary">Show the current percentage above each app volume bar</string>
     <string name="settings_systemui_builtin_volume_panel">Experimental built-in System UI panel</string>
     <string name="settings_systemui_builtin_volume_panel_summary">Show app volume controls inside the current system volume dialog; failures fall back to the overlay</string>
+    <string name="settings_hide_system_apps">Hide system apps</string>
+    <string name="settings_hide_system_apps_summary">Don\'t show system apps in the volume panel</string>
     <string name="home_github" translatable="false">GitHub</string>
     <string name="home_xposed_active">Module activated</string>
     <string name="home_xposed_inactive">Module not activated</string>

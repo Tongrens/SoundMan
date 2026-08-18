@@ -307,7 +307,11 @@ fun SoundPanel(
                             when (val currentMediaState = mediaState) {
                                 is ActiveMediaAppsState.Error -> PreferencesUnavailable(stringResource(R.string.panel_host_error))
                                 is ActiveMediaAppsState.Available -> AppVolumeList(
-                                    apps = currentApps,
+                                    apps = if (appSettings.hideSystemAppsEnabled) {
+                                        currentApps.filter { !it.isSystemApp }
+                                    } else {
+                                        currentApps
+                                    },
                                     rules = rules,
                                     readDefault = ruleStore::readOrDefault,
                                     showVolumePercent = appSettings.volumePercentEnabled,

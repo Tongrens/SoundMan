@@ -32,12 +32,14 @@ import java.util.concurrent.locks.ReentrantLock
 class SystemUiVolumeEntryRuntime(
     private val log: (priority: Int, tag: String, message: String, throwable: Throwable?) -> Unit,
     private val builtinPanelEnabled: () -> Boolean = { false },
+    private val hideSystemAppsEnabled: () -> Boolean = { false },
 ) {
     private val officialDismissHook = SystemUiOfficialDismissHookBridge(log)
     private val builtinPanel = SystemUiBuiltinVolumePanel(
         log = log,
         hookDismiss = officialDismissHook::dismiss,
         rescheduleOfficialTimeout = officialDismissHook::rescheduleTimeout,
+        hideSystemAppsEnabled = hideSystemAppsEnabled,
     )
     private val trackedEntries = ArrayList<TrackedEntry>()
     private val pendingInsertions = ArrayList<PendingInsertion>()

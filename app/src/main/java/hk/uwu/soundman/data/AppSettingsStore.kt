@@ -13,6 +13,7 @@ data class AppSettings(
     val smoothCornersEnabled: Boolean = AppSettingsDefaults.SMOOTH_CORNERS_ENABLED,
     val volumePercentEnabled: Boolean = AppSettingsDefaults.VOLUME_PERCENT_ENABLED,
     val systemUiBuiltinVolumePanelEnabled: Boolean = AppSettingsDefaults.SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED,
+    val hideSystemAppsEnabled: Boolean = AppSettingsDefaults.HIDE_SYSTEM_APPS_ENABLED,
 )
 
 /** 设置默认值，供存储实现与纯 JVM 测试共享。 */
@@ -20,6 +21,7 @@ object AppSettingsDefaults {
     const val SMOOTH_CORNERS_ENABLED = false
     const val VOLUME_PERCENT_ENABLED = false
     const val SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED = false
+    const val HIDE_SYSTEM_APPS_ENABLED = false
 }
 
 /** SharedPreferences 键名的唯一来源，避免读写两端发生漂移。 */
@@ -27,8 +29,14 @@ object AppSettingsKeys {
     const val SMOOTH_CORNERS = "smooth_corners_enabled"
     const val VOLUME_PERCENT = "volume_percent_enabled"
     const val SYSTEM_UI_BUILTIN_VOLUME_PANEL = "system_ui_builtin_volume_panel_enabled"
+    const val HIDE_SYSTEM_APPS = "hide_system_apps_enabled"
 
-    val all: Set<String> = setOf(SMOOTH_CORNERS, VOLUME_PERCENT, SYSTEM_UI_BUILTIN_VOLUME_PANEL)
+    val all: Set<String> = setOf(
+        SMOOTH_CORNERS,
+        VOLUME_PERCENT,
+        SYSTEM_UI_BUILTIN_VOLUME_PANEL,
+        HIDE_SYSTEM_APPS,
+    )
 }
 
 /**
@@ -48,6 +56,9 @@ interface AppSettingsStore {
 
     /** 持久化实验性 SystemUI 内置面板开关，并返回最新快照。 */
     fun setSystemUiBuiltinVolumePanelEnabled(enabled: Boolean): AppSettings
+
+    /** 持久化隐藏系统应用开关，并返回最新快照。 */
+    fun setHideSystemAppsEnabled(enabled: Boolean): AppSettings
 }
 
 /**
@@ -67,12 +78,25 @@ object SystemUiAppSettingsSync {
                     "available=${crossProcessPreferences.isPreferencesAvailable}",
         )
     }
+
+    /** 将"隐藏系统应用"设置同步到跨进程偏好，供 SystemUI 内置面板读取。 */
+    fun persistHideSystemAppsEnabled(context: Context, enabled: Boolean) {
+        val crossProcessPreferences = context.prefs(SYSTEM_UI_SETTINGS_PREFERENCES_NAME)
+        crossProcessPreferences.edit {
+            putBoolean(AppSettingsKeys.HIDE_SYSTEM_APPS, enabled)
+        }
+        AppLog.info(
+            "Persisted SystemUI hide-system-apps setting enabled=$enabled " +
+                    "available=${crossProcessPreferences.isPreferencesAvailable}",
+        )
+    }
 }
 
 /** 使用应用独立 SharedPreferences 文件保存设置。 */
 class SharedPreferencesAppSettingsStore(
     private val preferences: SharedPreferences,
     private val systemUiBuiltinPanelMirror: ((Boolean) -> Unit)? = null,
+    private val hideSystemAppsMirror: ((Boolean) -> Unit)? = null,
 ) : AppSettingsStore {
     override fun read(): AppSettings = logged("read app settings") {
         AppSettings(
@@ -87,6 +111,10 @@ class SharedPreferencesAppSettingsStore(
             systemUiBuiltinVolumePanelEnabled = preferences.getBoolean(
                 AppSettingsKeys.SYSTEM_UI_BUILTIN_VOLUME_PANEL,
                 AppSettingsDefaults.SYSTEM_UI_BUILTIN_VOLUME_PANEL_ENABLED,
+            ),
+            hideSystemAppsEnabled = preferences.getBoolean(
+                AppSettingsKeys.HIDE_SYSTEM_APPS,
+                AppSettingsDefaults.HIDE_SYSTEM_APPS_ENABLED,
             ),
         )
     }
@@ -109,6 +137,23 @@ class SharedPreferencesAppSettingsStore(
                 error.addSuppressed(rollbackError)
             }
             AppLog.error("Unable to mirror SystemUI builtin panel setting", error)
+            throw error
+        }
+        return updated
+    }
+
+    override fun setHideSystemAppsEnabled(enabled: Boolean): AppSettings {
+        val previous = read().hideSystemAppsEnabled
+        val updated = write(AppSettingsKeys.HIDE_SYSTEM_APPS, enabled)
+        try {
+            hideSystemAppsMirror?.invoke(enabled)
+        } catch (error: RuntimeException) {
+            try {
+                write(AppSettingsKeys.HIDE_SYSTEM_APPS, previous)
+            } catch (rollbackError: RuntimeException) {
+                error.addSuppressed(rollbackError)
+            }
+            AppLog.error("Unable to mirror hide-system-apps setting", error)
             throw error
         }
         return updated

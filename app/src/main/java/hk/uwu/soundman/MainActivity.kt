@@ -62,6 +62,9 @@ class MainActivity : ComponentActivity() {
             systemUiBuiltinPanelMirror = { enabled ->
                 SystemUiAppSettingsSync.persistBuiltinPanelEnabled(this, enabled)
             },
+            hideSystemAppsMirror = { enabled ->
+                SystemUiAppSettingsSync.persistHideSystemAppsEnabled(this, enabled)
+            },
         )
         try {
             SystemUiAppSettingsSync.persistBuiltinPanelEnabled(
@@ -71,6 +74,17 @@ class MainActivity : ComponentActivity() {
         } catch (error: RuntimeException) {
             AppLog.error(
                 "Unable to synchronize SystemUI builtin panel setting during startup",
+                error
+            )
+        }
+        try {
+            SystemUiAppSettingsSync.persistHideSystemAppsEnabled(
+                this,
+                settingsStore.read().hideSystemAppsEnabled,
+            )
+        } catch (error: RuntimeException) {
+            AppLog.error(
+                "Unable to synchronize hide-system-apps setting during startup",
                 error
             )
         }

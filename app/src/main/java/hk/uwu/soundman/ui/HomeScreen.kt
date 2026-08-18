@@ -166,6 +166,9 @@ fun HomeScreen(
                         onSystemUiBuiltinVolumePanelChanged = {
                             settings = settingsStore.setSystemUiBuiltinVolumePanelEnabled(it)
                         },
+                        onHideSystemAppsChanged = {
+                            settings = settingsStore.setHideSystemAppsEnabled(it)
+                        },
                     )
                 }
             }
@@ -416,6 +419,7 @@ private fun SettingsPage(
     onSmoothCornersChanged: (Boolean) -> Unit,
     onVolumePercentChanged: (Boolean) -> Unit,
     onSystemUiBuiltinVolumePanelChanged: (Boolean) -> Unit,
+    onHideSystemAppsChanged: (Boolean) -> Unit,
 ) {
     Column(
         Modifier
@@ -473,6 +477,12 @@ private fun SettingsPage(
             summary = stringResource(R.string.settings_systemui_builtin_volume_panel_summary),
             checked = settings.systemUiBuiltinVolumePanelEnabled,
             onCheckedChange = onSystemUiBuiltinVolumePanelChanged,
+        )
+        SettingsToggleCard(
+            title = stringResource(R.string.settings_hide_system_apps),
+            summary = stringResource(R.string.settings_hide_system_apps_summary),
+            checked = settings.hideSystemAppsEnabled,
+            onCheckedChange = onHideSystemAppsChanged,
         )
     }
 }
